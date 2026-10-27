@@ -3,7 +3,7 @@ import { createClient, type User } from '@supabase/supabase-js';
 import { cookies } from 'next/headers';
 import { db,one,run,id } from './db';
 
-export function supabaseConfigured(){return !!(process.env.NEXT_PUBLIC_SUPABASE_URL&&process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY);}
+export function supabaseConfigured(){const url=process.env.NEXT_PUBLIC_SUPABASE_URL,key=process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;if(!!url!==!!key)throw Error('Configure both the Supabase project URL and publishable key.');return !!(url&&key);}
 export async function supabaseServer(){
  if(!supabaseConfigured())throw Error('Supabase authentication is not configured.');
  const jar=await cookies();
@@ -25,6 +25,7 @@ export function linkSupabaseUser(account:User){
    if(local)run('UPDATE users SET supabase_id=?,verified=1,password=? WHERE id=?',account.id,'!supabase',local.id);
    else{const uid=id(),name=String(account.user_metadata?.full_name||account.user_metadata?.name||email.split('@')[0]).slice(0,100);run('INSERT INTO users(id,email,name,password,verified,supabase_id) VALUES(?,?,?,?,1,?)',uid,email,name,'!supabase',account.id);}
   }
+  if(local&&local.email!==email)run('UPDATE users SET email=?,verified=1 WHERE id=?',email,local.id);
   return one('SELECT * FROM users WHERE supabase_id=?',account.id)!;
  })();
 }

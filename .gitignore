@@ -8,3 +8,5 @@ data/
 *.tsbuildinfo
 .verify/
 .npm-cache/
+
+.next-auth-test/
