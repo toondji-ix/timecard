@@ -1,0 +1,25 @@
+{
+  "pageErrors": [],
+  "accessibility": [
+    {
+      "surface": "manager desktop",
+      "violations": []
+    },
+    {
+      "surface": "filtered attendance",
+      "violations": []
+    },
+    {
+      "surface": "manager mobile",
+      "violations": []
+    },
+    {
+      "surface": "map dialog",
+      "violations": []
+    },
+    {
+      "surface": "profile and consent",
+      "violations": []
+    }
+  ]
+}

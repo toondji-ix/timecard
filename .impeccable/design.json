@@ -1,0 +1,189 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-27T13:01:53.751787+00:00",
+  "title": "Design System: Timecard",
+  "extensions": {
+    "source": [
+      "app/globals.css",
+      "app/layout.tsx",
+      "app/timecard.tsx",
+      "app/workspace-controls.tsx"
+    ],
+    "verification": {
+      "mode": "source-and-final-sampled-browser-review",
+      "renderedVisualApproval": true,
+      "priorProductionBuild": "passed",
+      "finalUiBatchBuild": "pending",
+      "screenshots": [
+        ".impeccable/review/desktop.png",
+        ".impeccable/review/mobile.png",
+        ".impeccable/review/map-mobile.png",
+        ".impeccable/review/landing-desktop.png"
+      ],
+      "scope": "Refreshed desktop, 360px mobile, map and profile views opened. Five sampled surfaces report zero axe violations; checks.json reports no page errors.",
+      "limitations": "Final production rebuild pending. External map tiles not confirmed loaded. No full WCAG certification or live AWS face verification, email or SSO validation. Isolated sidecar previews have not been rendered.",
+      "approvalScope": "Reviewed sampled UI approved, subject to final production rebuild. No full WCAG certification.",
+      "checks": {
+        "pageErrors": 0,
+        "axeViolations": 0,
+        "sampledSurfaces": 5
+      },
+      "finalBuildStatus": "Compiled and typechecked; page collection failed with missing /_not-found entry. Generated-output cleanup/retry declined; final artifact verification outstanding."
+    },
+    "shadows": [
+      {
+        "name": "overlay",
+        "value": "0 14px 50px #1d35531a"
+      },
+      {
+        "name": "toast",
+        "value": "0 8px 30px #1439571a"
+      }
+    ],
+    "focus": {
+      "value": "outline:3px solid #4988e6;outline-offset:3px"
+    },
+    "breakpoints": [
+      {
+        "name": "mobile-max",
+        "value": "700px"
+      },
+      {
+        "name": "tablet-max",
+        "value": "950px"
+      },
+      {
+        "name": "desktop-compact-max",
+        "value": "1150px"
+      },
+      {
+        "name": "desktop-wide-min",
+        "value": "1450px"
+      }
+    ],
+    "motion": [
+      {
+        "name": "button",
+        "value": "background .15s,box-shadow .15s"
+      },
+      {
+        "name": "sidebar",
+        "value": "transform .2s"
+      }
+    ],
+    "reducedMotion": "Animations and transitions disabled; scroll-behavior:auto.",
+    "tokenMapping": {
+      "primary": "--blue",
+      "primary-hover": "--blue-dark",
+      "blue-surface": "--blue-soft",
+      "ink": "--ink",
+      "muted": "--muted",
+      "paper": "--paper",
+      "canvas": "--canvas",
+      "line": "--line",
+      "amber": "--amber",
+      "green": "--green"
+    },
+    "tonalRamps": "Omitted: no implemented tonal scales; no synthesized visual tokens.",
+    "fonts": {
+      "body": {
+        "family": "DM Sans Variable",
+        "package": "@fontsource-variable/dm-sans"
+      },
+      "heading": {
+        "family": "Manrope Variable",
+        "package": "@fontsource-variable/manrope"
+      },
+      "delivery": "Self-hosted imports in app/layout.tsx"
+    },
+    "navigation": {
+      "mobile": "Closed sidebar inert; open sidebar is modal, app body inert, focus moved into menu, Tab trapped, Escape closes, trigger focus restored."
+    },
+    "map": {
+      "interaction": "Pointer pin placement or arrow-key movement. Keyboard-generated click ignored.",
+      "failure": "Loading/failure status, retry button, coordinate-entry fallback.",
+      "verification": "Loading status displayed. Enter/Space did not move pin. External tile loading unconfirmed."
+    },
+    "clockTrust": "State-specific copy for face/location verified check-in, verified check-out, manual approval, and checks required before check-in.",
+    "tableScroll": "position:relative bounds visually hidden table header within scroller; exact rule browser-verified then saved to source."
+  },
+  "components": [
+    {
+      "name": "Standard Button",
+      "kind": "button",
+      "description": "Extracted from implemented source; isolated preview not rendered.",
+      "html": "<button class=\"ds-button \">Continue</button>",
+      "css": ":host{font-family:\"DM Sans Variable\",sans-serif;color:var(--ink,#26354b)}button,input{font:inherit}button{cursor:pointer;color:inherit;border:0;background:none}.ds-button{display:inline-flex;justify-content:center;align-items:center;gap:9px;border:1px solid #dfe5ee;border-radius:8px;min-height:41px;padding:10px 15px;background:#fff;color:#3c495e;font-size:13px;font-weight:600;white-space:nowrap;transition:background .15s,box-shadow .15s}.ds-button:hover{background:#f1f5fa}.ds-button:focus-visible{outline:3px solid #4988e6;outline-offset:3px}@media(prefers-reduced-motion:reduce){button{transition:none!important}}"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "description": "Extracted from implemented source; isolated preview not rendered.",
+      "html": "<button class=\"ds-button ds-primary\">Continue</button>",
+      "css": ":host{font-family:\"DM Sans Variable\",sans-serif;color:var(--ink,#26354b)}button,input{font:inherit}button{cursor:pointer;color:inherit;border:0;background:none}.ds-button{display:inline-flex;justify-content:center;align-items:center;gap:9px;border:1px solid #dfe5ee;border-radius:8px;min-height:41px;padding:10px 15px;background:#fff;color:#3c495e;font-size:13px;font-weight:600;white-space:nowrap;transition:background .15s,box-shadow .15s}.ds-button:hover{background:#f1f5fa}.ds-button.ds-primary{background:var(--blue);color:white;border-color:var(--blue)}.ds-button.ds-primary:hover{background:var(--blue-dark)}.ds-button:focus-visible{outline:3px solid #4988e6;outline-offset:3px}@media(prefers-reduced-motion:reduce){button{transition:none!important}}",
+      "refersTo": "button-primary"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "description": "Extracted from implemented source; isolated preview not rendered.",
+      "html": "<button class=\"ds-button ds-danger\">Continue</button>",
+      "css": ":host{font-family:\"DM Sans Variable\",sans-serif;color:var(--ink,#26354b)}button,input{font:inherit}button{cursor:pointer;color:inherit;border:0;background:none}.ds-button{display:inline-flex;justify-content:center;align-items:center;gap:9px;border:1px solid #dfe5ee;border-radius:8px;min-height:41px;padding:10px 15px;background:#fff;color:#3c495e;font-size:13px;font-weight:600;white-space:nowrap;transition:background .15s,box-shadow .15s}.ds-button:hover{background:#f1f5fa}.ds-button.ds-danger{background:#b83838;color:#fff;border-color:#b83838}.ds-button:focus-visible{outline:3px solid #4988e6;outline-offset:3px}@media(prefers-reduced-motion:reduce){button{transition:none!important}}"
+    },
+    {
+      "name": "Text Button",
+      "kind": "button",
+      "description": "Extracted from implemented source; isolated preview not rendered.",
+      "html": "<button class=\"ds-text-button\">View attendance</button>",
+      "css": ":host{font-family:\"DM Sans Variable\",sans-serif;color:var(--ink,#26354b)}button,input{font:inherit}button{cursor:pointer;color:inherit;border:0;background:none}.ds-text-button{color:var(--blue);display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:6px 0}.ds-text-button:hover{text-decoration:underline;text-underline-offset:4px}.ds-text-button:focus-visible{outline:3px solid #4988e6;outline-offset:3px}@media(prefers-reduced-motion:reduce){button{transition:none!important}}"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "description": "Extracted from implemented source; isolated preview not rendered.",
+      "html": "<label>Name <input class=\"ds-input\" placeholder=\"Your name\"></label>",
+      "css": ":host{font-family:\"DM Sans Variable\",sans-serif;color:var(--ink,#26354b)}button,input{font:inherit}button{cursor:pointer;color:inherit;border:0;background:none}.ds-input{border:1px solid #dce2eb;border-radius:8px;background:white;padding:11px 12px;min-height:44px;color:var(--ink);max-width:100%;font-size:14px}.ds-input::placeholder{color:#7b8391}.ds-input:focus-visible{outline:3px solid #4988e6;outline-offset:3px}",
+      "refersTo": "input"
+    },
+    {
+      "name": "Panel",
+      "kind": "card",
+      "description": "Extracted from implemented source; isolated preview not rendered.",
+      "html": "<section class=\"ds-panel\">Attendance overview</section>",
+      "css": ":host{font-family:\"DM Sans Variable\",sans-serif;color:var(--ink,#26354b)}button,input{font:inherit}button{cursor:pointer;color:inherit;border:0;background:none}.ds-panel{background:#fff;border:1px solid var(--line);border-radius:11px;padding:23px;min-width:0}@media(max-width:700px){.ds-panel{padding:20px}}",
+      "refersTo": "panel"
+    },
+    {
+      "name": "Selected Navigation",
+      "kind": "nav",
+      "description": "Extracted from implemented source; isolated preview not rendered.",
+      "html": "<nav class=\"ds-side-nav\"><button class=\"ds-active\" aria-current=\"page\">Overview</button><button>Attendance</button></nav>",
+      "css": ":host{font-family:\"DM Sans Variable\",sans-serif;color:var(--ink,#26354b)}button,input{font:inherit}button{cursor:pointer;color:inherit;border:0;background:none}.ds-side-nav{display:flex;flex-direction:column;gap:7px}.ds-side-nav button{display:flex;align-items:center;gap:12px;min-height:43px;border-radius:7px;padding:10px 13px;text-align:left;color:#59687d;font-size:12px}.ds-side-nav button:hover{background:#f6f8fc}.ds-side-nav button.ds-active{background:#edf3fe;color:var(--blue);font-weight:600}.ds-side-nav button:focus-visible{outline:3px solid #4988e6;outline-offset:3px}.ds-side-nav button{font-size:13px}"
+    },
+    {
+      "name": "Present Status",
+      "kind": "chip",
+      "description": "Extracted from implemented source; isolated preview not rendered.",
+      "html": "<span class=\"ds-badge ds-present\"><span></span>Present</span>",
+      "css": ":host{font-family:\"DM Sans Variable\",sans-serif;color:var(--ink,#26354b)}button,input{font:inherit}button{cursor:pointer;color:inherit;border:0;background:none}.ds-badge{font-size:10px;display:inline-flex;align-items:center;gap:5px;padding:5px 8px;border-radius:5px;background:#f1f3f6;color:#737f91;font-weight:500;white-space:nowrap}.ds-badge>span{width:4px;height:4px;border-radius:50%;background:currentColor}.ds-badge.ds-present,.ds-badge.ds-approved,.ds-badge.ds-accepted,.ds-badge.ds-verified{background:#eef7f2;color:#347454}"
+    }
+  ],
+  "narrative": {
+    "overview": "The confirmed Caregiver direction is warm, friendly, calm and dependable. Blue primary actions, light blue surfaces and restrained amber accents carry that commitment into the source styles. White panels and quiet dividers organize attendance data.",
+    "keyCharacteristics": [
+      "Blue actions and light blue supporting surfaces.",
+      "White panels, fine borders and compact attendance tables.",
+      "Rounded controls with visible keyboard focus."
+    ],
+    "rules": [],
+    "dos": [
+      "Do preserve blue primary actions and restrained warm amber accents.",
+      "Do reuse existing controls, panels and text-bearing status badges.",
+      "Do retain keyboard focus and reduced-motion treatments."
+    ],
+    "donts": [
+      "Don't invent a global spacing scale from context-specific measurements.",
+      "Don't extend sampled UI approval into full WCAG certification or unverified live integration claims."
+    ]
+  }
+}

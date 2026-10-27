@@ -1,0 +1,10 @@
+node_modules/
+.next/
+.next-test/
+.next-preview/
+.env*
+!.env.example
+data/
+*.tsbuildinfo
+.verify/
+.npm-cache/
