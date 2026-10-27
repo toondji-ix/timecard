@@ -10,7 +10,7 @@ const password=z.string().min(10).max(128);
 const base=()=>process.env.APP_URL||'http://localhost:3000';
 const json=(data:object={})=>NextResponse.json({ok:true,...data},{headers:{'Cache-Control':'no-store'}});
 function redirect(path:string){const response=NextResponse.redirect(new URL(path,base()));response.headers.set('Cache-Control','no-store');return response;}
-function callback(flow?:string,invite?:string){const url=new URL('/api/auth/callback',base());if(flow)url.searchParams.set('flow',flow);if(invite)url.searchParams.set('invite',invite);return url.href;}
+function callback(flow?:string,invite?:string){const url=new URL('/api/auth/callback',base());url.searchParams.set('flow',flow||'signin');if(invite)url.searchParams.set('invite',invite);return url.href;}
 
 export async function supabaseAuthGet(req:NextRequest,path:string){
  if(!['auth/google','auth/callback','auth/confirm'].includes(path))return null;
@@ -63,7 +63,7 @@ export async function supabaseAuthPost(path:string,b:Record<string,unknown>){
  }
  if(path==='auth/resend'){
   const address=email.parse(b.email);rateLimit('verify:'+address,3);
-  const {error}=await client.auth.resend({type:'signup',email:address,options:{emailRedirectTo:callback()}});
+  const {error}=await client.auth.resend({type:'signup',email:address,options:{emailRedirectTo:callback(undefined,typeof b.invite==='string'&&/^[\w-]{1,100}$/.test(b.invite)?b.invite:undefined)}});
   if(error)throw Error('The verification email could not be requested. Please try again later.');
   return json({message:'If confirmation is needed, a verification email has been sent.'});
  }

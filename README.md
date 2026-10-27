@@ -1,6 +1,6 @@
 # Timecard
 
-A responsive attendance workspace implementing the supplied Smart Time Tracking PRD. Next.js, React and TypeScript; durable SQLite; AWS Rekognition face verification; Resend email; Paystack test subscriptions.
+A responsive attendance workspace implementing the supplied Smart Time Tracking PRD. Next.js, React and TypeScript; durable SQLite; AWS Rekognition face verification; Supabase authentication; Resend workspace email; Paystack test subscriptions.
 
 ## Start locally
 
@@ -11,7 +11,7 @@ npm run dev
 
 Open http://localhost:3000. The dev command generates session/encryption keys in ignored `.env.local` if they are missing. Keep those keys stable. Create an account, verify your email, create a workspace, add its work location, and invite your team.
 
-Without email credentials, development emails are stored locally. Run `npm run mailbox` in a private terminal to read verification and password-reset links. Production signup requires real email delivery. No mailbox web endpoint exists.
+With the Supabase URL and publishable key configured, Supabase handles authentication emails. The legacy local flow remains available for development/tests when neither Supabase variable is set. Its emails can be read through `npm run mailbox`; Supabase emails do not appear there. See [DEPLOYMENT.md](DEPLOYMENT.md) for Supabase email/Google setup, existing-account behavior and Render hosting settings.
 
 ## Confirmed product settings
 
@@ -25,7 +25,7 @@ The Paystack test key is configured in `.env.local`. `.env.example` contains emp
 
 ## Included workflows
 
-- Email/password signup, verification, sign-in, reset and session invalidation after password changes.
+- Supabase email/password signup, verification, sign-in, recovery and Google OAuth with PKCE; versioned application sessions are invalidated after password changes.
 - Workspace creation, owner/manager/staff roles, workspace switching, expiring single-use email/link invites and revocation.
 - Map pin selection by pointer or keyboard, current-location placement, configurable radius, server-side geofence and accuracy checks.
 - Consent, AWS liveness and encrypted face identifiers, face deletion, GPS + face check-in/out, duplicate protection, recorded breaks, late/early flags and independent manual approval.
@@ -66,7 +66,7 @@ Provider references: https://docs.aws.amazon.com/rekognition/latest/dg/face-live
 
 ### Email and sales
 
-Set `EMAIL_API_KEY`, a verified `EMAIL_FROM`, and `SALES_EMAIL`. Resend delivers verification, password reset, invitation and leave updates. Failed delivery remains in an outbox for retry. In-app notifications persist independently. Sales enquiries require a configured destination; no address is invented.
+Set `EMAIL_API_KEY`, a verified `EMAIL_FROM`, and `SALES_EMAIL`. When Supabase is configured, it delivers verification and password-reset emails; Resend delivers workspace invitation and leave updates. Failed delivery remains in an outbox for retry. In-app notifications persist independently. Sales enquiries require a configured destination; no address is invented.
 
 ### Enterprise SSO
 
