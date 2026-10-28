@@ -8,6 +8,8 @@ import {unlinkSync} from 'node:fs';
 import Database from 'better-sqlite3';
 import {hash} from 'bcryptjs';
 
+const renderOrigin='https://timecard-y77q.onrender.com';
+let providerRequests=0;
 const file=resolve('data/supabase-test-'+randomUUID()+'.sqlite'),base='http://localhost:3118';
 let provider:Server,server:ChildProcess,db:Database.Database,logs='',providerUrl='',newPassword='Long-provider-password!';
 const subject=randomUUID(),address='existing@example.invalid';
@@ -15,9 +17,9 @@ const account=()=>({id:subject,aud:'authenticated',role:'authenticated',email:ad
 const token=()=>{const encode=(v:unknown)=>Buffer.from(JSON.stringify(v)).toString('base64url');return encode({alg:'HS256',typ:'JWT'})+'.'+encode({sub:subject,exp:Math.floor(Date.now()/1000)+3600,iat:Math.floor(Date.now()/1000),aud:'authenticated',role:'authenticated',email:address})+'.test-signature';};
 const credentials=()=>({access_token:token(),refresh_token:'mock-refresh-token',token_type:'bearer',expires_in:3600,user:account()});
 type Client=Map<string,string>;const browser:Client=new Map();
-async function call(path:string,body?:object,client=browser){const r=await fetch(base+'/api/'+path,{redirect:'manual',method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/json'}:{}),Cookie:Array.from(client).map(([k,v])=>k+'='+v).join('; ')},...(body?{body:JSON.stringify(body)}:{})});for(const c of r.headers.getSetCookie()){const pair=c.split(';')[0],at=pair.indexOf('=');client.set(pair.slice(0,at),pair.slice(at+1));}return {status:r.status,location:r.headers.get('location'),data:r.headers.get('content-type')?.includes('json')?await r.json():null};}
+async function call(path:string,body?:object,client=browser,extraHeaders:Record<string,string>={}){const r=await fetch(base+'/api/'+path,{redirect:'manual',method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/json',Origin:base}:{}),...extraHeaders,Cookie:Array.from(client).map(([k,v])=>k+'='+v).join('; ')},...(body?{body:JSON.stringify(body)}:{})});for(const c of r.headers.getSetCookie()){const pair=c.split(';')[0],at=pair.indexOf('=');client.set(pair.slice(0,at),pair.slice(at+1));}return {status:r.status,location:r.headers.get('location'),data:r.headers.get('content-type')?.includes('json')?await r.json():null};}
 before(async()=>{
- provider=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{},url=new URL(req.url!,'http://provider');res.setHeader('Content-Type','application/json');
+ provider=createServer(async(req,res)=>{providerRequests++;let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{},url=new URL(req.url!,'http://provider');res.setHeader('Content-Type','application/json');
   if(url.pathname==='/auth/v1/signup'){res.end(JSON.stringify({...account(),email_confirmed_at:null}));return;}
   if(url.pathname==='/auth/v1/token'){
    if(url.searchParams.get('grant_type')==='password'&&(body.email!==address||body.password!==newPassword)){res.statusCode=400;res.end(JSON.stringify({code:'invalid_credentials',msg:'Invalid login credentials'}));return;}
@@ -32,19 +34,23 @@ before(async()=>{
   if(['/auth/v1/recover','/auth/v1/resend','/auth/v1/logout'].includes(url.pathname)){res.end('{}');return;}
   res.statusCode=404;res.end('{}');
  });await new Promise<void>(r=>provider.listen(0,'127.0.0.1',r));providerUrl='http://127.0.0.1:'+(provider.address() as {port:number}).port;
- server=spawn(process.execPath,[resolve('node_modules/next/dist/bin/next'),'dev','--port','3118'],{env:{...process.env,NODE_ENV:'development',NEXT_DIST_DIR:'.next-auth-test',DATABASE_PATH:file,TIMECARD_MAINTENANCE:'off',NEXT_PUBLIC_SUPABASE_URL:providerUrl,NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:'sb_publishable_isolated_test',SUPABASE_SECRET_KEY:'',SESSION_SECRET:'isolated-supabase-test-session-secret',APP_URL:base,EMAIL_API_KEY:''},windowsHide:true,stdio:['ignore','pipe','pipe']});
+ server=spawn(process.execPath,[resolve('node_modules/next/dist/bin/next'),'dev','--port','3118'],{env:{...process.env,NODE_ENV:'development',NEXT_DIST_DIR:'.next-auth-test',DATABASE_PATH:file,TIMECARD_MAINTENANCE:'off',NEXT_PUBLIC_SUPABASE_URL:providerUrl,NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:'sb_publishable_isolated_test',SUPABASE_SECRET_KEY:'',SESSION_SECRET:'isolated-supabase-test-session-secret',APP_URL:base,RENDER_EXTERNAL_URL:renderOrigin,EMAIL_API_KEY:''},windowsHide:true,stdio:['ignore','pipe','pipe']});
  server.stdout?.on('data',v=>logs=(logs+v).slice(-6000));server.stderr?.on('data',v=>logs=(logs+v).slice(-6000));let ready=false;for(let i=0;i<30;i++){try{if((await fetch(base+'/api/public/config',{signal:AbortSignal.timeout(30000)})).ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,1000));}assert.ok(ready,logs);db=new Database(file);
  db.prepare('INSERT INTO users(id,email,name,password,verified) VALUES(?,?,?,?,1)').run('existing-local',address,'Existing Person',await hash('Old-local-password!',10));
  db.prepare("INSERT INTO organizations(id,name) VALUES('existing-org','Existing workspace')").run();db.prepare("INSERT INTO memberships(id,org_id,user_id,role) VALUES('existing-membership','existing-org','existing-local','owner')").run();
 },{timeout:240000});
 
+test('foreign browser origins are rejected before reaching Supabase',async()=>{
+ const before=providerRequests;for(const path of ['auth/signup','auth/login']){const r=await call(path,{name:'Intruder',email:address,password:newPassword},new Map(),{Origin:'https://attacker.example','x-forwarded-host':'attacker.example','x-forwarded-proto':'https'});assert.equal(r.status,403);assert.equal(r.data.error,'Invalid request origin.');}assert.equal(providerRequests,before);
+});
+
 test('Supabase signup requires confirmation and local-password fallback cannot bypass the provider',async()=>{
- let r=await call('auth/signup',{name:'Existing Person',email:address,password:'Long-provider-password!'});assert.equal(r.status,200);assert.equal(r.data.confirmationRequired,true);assert.equal((await call('state')).status,401);
+ let r=await call('auth/signup',{name:'Existing Person',email:address,password:'Long-provider-password!'},browser,{Origin:renderOrigin});assert.equal(r.status,200);assert.equal(r.data.confirmationRequired,true);assert.equal((await call('state')).status,401);
  r=await call('auth/login',{email:address,password:'Old-local-password!'});assert.equal(r.status,400);
  assert.equal((await call('auth/resend',{email:address})).status,200);
 });
 test('verified provider login links the existing account without changing memberships and rejects forged provider cookies',async()=>{
- assert.equal((await call('auth/login',{email:address,password:newPassword})).status,200);
+ assert.equal((await call('auth/login',{email:address,password:newPassword},browser,{Origin:renderOrigin})).status,200);
  const r=await call('state');assert.equal(r.status,200);assert.equal(r.data.user.id,'existing-local');assert.equal(r.data.organization.id,'existing-org');assert.equal(r.data.user.supabase_id,subject);
  const forged=new Map(Array.from(browser).filter(([k])=>k==='timecard_session'));assert.equal((await call('state',undefined,forged)).status,401);
  assert.equal((db.prepare('SELECT count(*) n FROM users').get() as {n:number}).n,1);

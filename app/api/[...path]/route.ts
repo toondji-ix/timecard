@@ -14,6 +14,7 @@ import {allowanceFor,validateCalendarDay} from '@/lib/leave';
 import {beginSso,finishSso,ssoConfigured} from '@/lib/oidc';
 import {supabaseAuthGet,supabaseAuthPost} from '@/lib/supabase-auth';
 import {supabaseConfigured,confirmSupabasePassword,deleteSupabaseUser,supabaseAdminConfigured} from '@/lib/supabase';
+import {validAuthOrigin} from '@/lib/auth-origin';
 export const runtime='nodejs';
 const str=z.string().trim().min(1).max(500),day=z.string().regex(/^\d{4}-\d{2}-\d{2}$/),time=z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 const appUrl=()=>process.env.APP_URL||'http://localhost:3000';
@@ -55,7 +56,7 @@ export async function GET(req:NextRequest,{params}:{params:Promise<{path:string[
 export async function POST(req:NextRequest,{params}:{params:Promise<{path:string[]}>}){try{
  const path=(await params).path.join('/');
  if(path==='billing/webhook')return await webhook(req);
- if(req.headers.get('origin')&&req.headers.get('origin')!==req.nextUrl.origin)return fail('Invalid request origin.',403);
+ if(path.startsWith('auth/')?!validAuthOrigin(req):req.headers.get('origin')&&req.headers.get('origin')!==req.nextUrl.origin)return fail('Invalid request origin.',403);
  if(Number(req.headers.get('content-length')||0)>100000)return fail('Request is too large.',413);
  const b=await req.json();
  const providerResponse=await supabaseAuthPost(path,b);if(providerResponse)return providerResponse;
