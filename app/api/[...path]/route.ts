@@ -56,7 +56,8 @@ export async function GET(req:NextRequest,{params}:{params:Promise<{path:string[
 export async function POST(req:NextRequest,{params}:{params:Promise<{path:string[]}>}){try{
  const path=(await params).path.join('/');
  if(path==='billing/webhook')return await webhook(req);
- if(path.startsWith('auth/')?!validAuthOrigin(req):req.headers.get('origin')&&req.headers.get('origin')!==req.nextUrl.origin)return fail('Invalid request origin.',403);
+ const usesPublicOrigin=path.startsWith('auth/')||path==='workspace';
+ if(usesPublicOrigin?!validAuthOrigin(req):req.headers.get('origin')&&req.headers.get('origin')!==req.nextUrl.origin)return fail('Invalid request origin.',403);
  if(Number(req.headers.get('content-length')||0)>100000)return fail('Request is too large.',413);
  const b=await req.json();
  const providerResponse=await supabaseAuthPost(path,b);if(providerResponse)return providerResponse;

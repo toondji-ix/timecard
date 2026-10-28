@@ -62,6 +62,14 @@ test('verified provider login links the existing account without changing member
  const forged=new Map(Array.from(browser).filter(([k])=>k==='timecard_session'));assert.equal((await call('state',undefined,forged)).status,401);
  assert.equal((db.prepare('SELECT count(*) n FROM users').get() as {n:number}).n,1);
 });
+test('workspace creation accepts the deployed HTTPS origin and still rejects foreign or unauthenticated requests',async()=>{
+ const input={name:'Semester Technologies',timezone:'Africa/Lagos',start_time:'09:00',end_time:'18:00'},before=(db.prepare('SELECT count(*) n FROM organizations').get() as {n:number}).n;
+ for(const headers of [{Origin:'https://attacker.example','x-forwarded-host':'attacker.example','x-forwarded-proto':'https'},{Origin:renderOrigin,'sec-fetch-site':'cross-site'}] as Record<string,string>[]){const rejected=await call('workspace',input,browser,headers);assert.equal(rejected.status,403);assert.equal(rejected.data.error,'Invalid request origin.');}
+ assert.equal((await call('workspace',input,new Map(),{Origin:renderOrigin})).status,401);assert.equal((db.prepare('SELECT count(*) n FROM organizations').get() as {n:number}).n,before);
+ const created=await call('workspace',input,browser,{Origin:renderOrigin});assert.equal(created.status,200,JSON.stringify(created.data));const org=created.data.org;
+ try{const state=await call('state?org='+org);assert.equal(state.status,200);assert.equal(state.data.organization.name,input.name);assert.equal(state.data.organization.timezone,'Africa/Lagos');assert.equal(state.data.organization.end_time,'18:00');assert.equal(state.data.membership.role,'owner');assert.equal(state.data.user.id,'existing-local');assert.equal(state.data.leaveTypes.length,4);}finally{db.prepare('DELETE FROM audit_logs WHERE org_id=?').run(org);db.prepare('DELETE FROM leave_types WHERE org_id=?').run(org);db.prepare('DELETE FROM memberships WHERE org_id=?').run(org);db.prepare('DELETE FROM organizations WHERE id=?').run(org);}
+});
+
 test('Google uses PKCE, keeps invitation context, and callback errors return to the sign-in screen',async()=>{
  const r=await call('auth/google?invite=invitation-token');assert.equal(r.status,307);const url=new URL(r.location!);assert.equal(url.origin,providerUrl);assert.equal(url.searchParams.get('provider'),'google');assert.equal(url.searchParams.get('code_challenge_method'),'s256');assert.ok(url.searchParams.get('code_challenge'));
  const result=await call('auth/callback?code=mock-code');assert.equal(result.status,307);assert.equal(new URL(result.location!).searchParams.get('invite'),'invitation-token');
