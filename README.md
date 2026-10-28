@@ -1,6 +1,6 @@
 # Timecard
 
-A responsive attendance workspace implementing the supplied Smart Time Tracking PRD. Next.js, React and TypeScript; durable SQLite; AWS Rekognition face verification; Supabase authentication; Resend workspace email; Paystack test subscriptions.
+A responsive attendance workspace implementing the supplied Smart Time Tracking PRD. Next.js, React and TypeScript; durable SQLite; AWS Rekognition face verification; Supabase authentication and invitation email; Resend notifications; Paystack test subscriptions.
 
 ## Start locally
 
@@ -66,7 +66,7 @@ Provider references: https://docs.aws.amazon.com/rekognition/latest/dg/face-live
 
 ### Email and sales
 
-Set `EMAIL_API_KEY`, a verified `EMAIL_FROM`, and `SALES_EMAIL`. When Supabase is configured, it delivers verification and password-reset emails; Resend delivers workspace invitation and leave updates. Failed delivery remains in an outbox for retry. In-app notifications persist independently. Sales enquiries require a configured destination; no address is invented.
+Supabase delivers authentication and workspace invitation emails through its configured SMTP provider (Gmail is supported by the configured project). Set server-only `SUPABASE_SECRET_KEY` for invitation delivery, and configure the Supabase invitation/magic-link templates described in [DEPLOYMENT.md](DEPLOYMENT.md). Resend is no longer required for invitations. For leave updates and sales email, the existing mailer still uses `EMAIL_API_KEY`, `EMAIL_FROM`, and `SALES_EMAIL`. Failed invitations remain in a dedicated retry queue. In-app notifications persist independently. Sales enquiries require a configured destination; no address is invented.
 
 ### Enterprise SSO
 

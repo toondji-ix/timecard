@@ -38,7 +38,7 @@ NEXT_PUBLIC_BUSINESS_PRICE_LABEL=₦15,000
 TIMECARD_MAINTENANCE=on
 ```
 
-Copy the applicable Paystack test, AWS and Resend variables listed in `.env.example` into Render as well. Keep `SESSION_SECRET` and `DATA_ENCRYPTION_KEY` stable across deploys. Never regenerate the data key if encrypted face identifiers already exist. Supabase account deletion additionally requires server-only `SUPABASE_SECRET_KEY`, which must never use a `NEXT_PUBLIC_` prefix. The publishable key is sufficient for ordinary authentication.
+Copy the applicable Paystack test, AWS and Resend variables listed in `.env.example` into Render as well. Keep `SESSION_SECRET` and `DATA_ENCRYPTION_KEY` stable across deploys. Never regenerate the data key if encrypted face identifiers already exist. Supabase workspace invitations and account deletion require server-only `SUPABASE_SECRET_KEY`, which must never use a `NEXT_PUBLIC_` prefix. The publishable key is sufficient for ordinary authentication.
 
 If signup reports missing email verification, check these two Supabase values in **Render → your Web Service → Environment**. Local `.env.local` values are not deployed. Authentication reads the server runtime values above; the older `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` names are also supported. Save the environment changes and redeploy. Production authentication does not fall back to Resend/local signup when Supabase settings are missing.
 
@@ -59,7 +59,7 @@ The configured Supabase project accepted its publishable key in a read-only sett
 
 ## Other callbacks and verification
 
-Set the Paystack **test** webhook URL to `https://YOUR-SERVICE.onrender.com/api/billing/webhook`. AWS face verification still requires its region, IAM credentials and liveness role. Resend sends workspace invitations and leave notifications; Supabase sends authentication emails when configured.
+Set the Paystack **test** webhook URL to `https://YOUR-SERVICE.onrender.com/api/billing/webhook`. AWS face verification still requires its region, IAM credentials and liveness role. Supabase sends authentication and workspace invitation emails through its configured SMTP. The existing Resend mailer remains for leave notifications and sales email.
 
 Run the build and tests successfully before deployment. The previous local production build encountered an internal Next.js page-collection error; a cleanup/rebuild was declined. The current Supabase changes need their own successful build before production readiness can be claimed. This document supplies configuration; no Render service or disk has been provisioned.
 
@@ -80,3 +80,33 @@ For password reset across browsers, set the **Reset password** email template in
 The app verifies this recovery token with Supabase and creates a short-lived, single-use application reset token. Standard PKCE links instead require the browser cookies from the browser that requested the reset. Request a fresh email after changing the settings; use only the newest email. A genuinely expired, already-used, or scanner-consumed provider link cannot be revived by the application. Do not share full reset URLs or tokens in logs/chat.
 
 If Supabase returns an authorization code to Site URL as `/?code=...`, authentication middleware forwards it to `/api/auth/callback` before the landing page renders. The callback exchanges the code for verified cookies and returns a code-free URL. Recovery intent is retained from the PKCE flow even if the fallback redirect omitted its query parameter. Continue to allow the canonical callback path in Supabase Redirect URLs.
+
+## Workspace invitation email through Supabase and Gmail SMTP
+
+Your `onrender.com` address remains the app URL. No Resend account or custom web domain is needed for workspace invitations. Supabase uses the Gmail SMTP settings already configured in its dashboard; keep the Gmail app password in Supabase, not in application source or public environment variables. Gmail sending quotas and delivery policies still apply.
+
+In Render Environment, add `SUPABASE_SECRET_KEY` using the Supabase project's secret key (or legacy service-role key). It is server-only and must never have a `NEXT_PUBLIC_` prefix. Keep the existing Supabase project URL and publishable key, plus `APP_URL` set to the app's HTTPS origin. Missing administrative credentials leave the invitation queued and display an actionable status while preserving the shareable link.
+
+In Supabase **Authentication → URL Configuration**, set Site URL to the Render HTTPS origin and allow both `/api/auth/callback` and `/api/auth/confirm` on that origin. The invitation callback adds flow and workspace-invite query parameters. Local development can retain its localhost callback entries.
+
+In **Authentication → Email Templates**, configure these links. Keep the existing password-reset template unchanged:
+
+**Invite user**:
+
+```html
+<a href="{{ .RedirectTo }}&amp;token_hash={{ .TokenHash }}&amp;type=invite">Join your workspace</a>
+```
+
+**Magic Link** and **Confirm signup**:
+
+```html
+<a href="{{ .RedirectTo }}&amp;token_hash={{ .TokenHash }}&amp;type=email">Continue to Timecard</a>
+```
+
+App-generated RedirectTo URLs always contain a flow query parameter. These token-hash links work in the recipient's browser and do not depend on the inviting manager's browser cookies. Supabase admin invites do not support PKCE. Using the default implicit invite link instead of the templates above will not establish the server-side app session.
+
+New recipients get a Supabase admin invitation. Already registered accounts receive a Supabase email sign-in link with account creation disabled. The verified email must match the local invitation before the app presents workspace acceptance. Membership, role and department come from the local invitation only after explicit acceptance; sending or opening email never grants membership by itself. Invited users can use password reset to set a password, or use Google with the same email.
+
+The invitation dialog distinguishes provider acceptance, queued delivery and missing configuration. SMTP acceptance is not proof of inbox delivery. Pending native invitations and legacy unsent Resend invitation messages are retried through Supabase by the existing maintenance worker; expired, revoked and accepted invitations are skipped. Old localhost invitation URLs are not reused: each Supabase retry carries the saved workspace token on the public HTTPS callback. Generic Resend outbox processing excludes invitation messages.
+
+No real Gmail messages were sent during automated checks. Verify one manager-initiated invitation after configuring the secret key/templates and deploying. If it is accepted by Supabase but does not arrive, check Supabase Auth logs and Gmail delivery/sending limits.

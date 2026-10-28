@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS memberships(id TEXT PRIMARY KEY,org_id TEXT REFERENCE
 CREATE TABLE IF NOT EXISTS locations(id TEXT PRIMARY KEY,org_id TEXT REFERENCES organizations(id),name TEXT,lat REAL,lng REAL,radius INTEGER DEFAULT 100);
 CREATE TABLE IF NOT EXISTS face_templates(user_id TEXT PRIMARY KEY,template TEXT NOT NULL,created TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS invites(id TEXT PRIMARY KEY,org_id TEXT REFERENCES organizations(id),email TEXT,role TEXT,department TEXT,token TEXT UNIQUE,expires TEXT,revoked INTEGER DEFAULT 0,accepted INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS invite_deliveries(invite_id TEXT PRIMARY KEY REFERENCES invites(id) ON DELETE CASCADE,status TEXT DEFAULT 'pending',attempts INTEGER DEFAULT 0,last_error TEXT,updated TEXT);
 CREATE TABLE IF NOT EXISTS attendance(id TEXT PRIMARY KEY,org_id TEXT REFERENCES organizations(id),user_id TEXT REFERENCES users(id),day TEXT,check_in TEXT,check_out TEXT,lat REAL,lng REAL,location_id TEXT,match_score REAL,status TEXT,late INTEGER DEFAULT 0,early INTEGER DEFAULT 0,break_minutes REAL DEFAULT 0,break_start TEXT,synced_late INTEGER DEFAULT 0,notes TEXT DEFAULT '',checkout_lat REAL,checkout_lng REAL,checkout_score REAL,checkout_location_id TEXT,UNIQUE(org_id,user_id,day));
 CREATE TABLE IF NOT EXISTS manual_requests(id TEXT PRIMARY KEY,org_id TEXT,user_id TEXT,action TEXT,reason TEXT,created TEXT,status TEXT DEFAULT 'pending',comment TEXT,decided_by TEXT);
 CREATE TABLE IF NOT EXISTS leave_types(id TEXT PRIMARY KEY,org_id TEXT,name TEXT,allowance INTEGER);

@@ -44,15 +44,20 @@ export async function supabaseAuthGet(req:NextRequest,path:string){
   }
   const providerError=authRedirectError(req.nextUrl.search);if(providerError)throw Error(providerError);
   const code=req.nextUrl.searchParams.get('code'),token=req.nextUrl.searchParams.get('token_hash'),type=req.nextUrl.searchParams.get('type');
+  const workspaceToken=req.nextUrl.searchParams.get('invite');
+  const workspaceEmailFlow=type==='invite'||((type==='email'||type==='signup')&&req.nextUrl.searchParams.get('flow')==='invite');
+  const workspaceInvite=workspaceEmailFlow&&workspaceToken?one('SELECT * FROM invites WHERE token=? AND accepted=0 AND revoked=0 AND expires>?',workspaceToken,now()):null;
+  if(workspaceEmailFlow&&!workspaceInvite)throw Error('This workspace invitation has expired or was revoked. Ask your manager for a new invitation.');
   let recovery=req.nextUrl.searchParams.get('flow')==='recovery';
-  if(token&&(type==='signup'||type==='recovery')){
+  if(token&&(type==='signup'||type==='recovery'||type==='invite'||type==='email')){
    const {error}=await client.auth.verifyOtp({token_hash:token,type});if(error)throw Error('This email link is invalid or has expired.');recovery=type==='recovery';
   }else if(code){const {data,error}=await client.auth.exchangeCodeForSession(code);if(error)throw exchangeFailure(error);if('redirectType' in data&&data.redirectType==='recovery')recovery=true;}
   else throw Error('This sign-in link is incomplete.');
   const {data,error}=await client.auth.getUser();if(error||!data.user)throw Error('Your identity could not be verified. Please sign in again.');
+  if(workspaceInvite&&workspaceInvite.email.toLowerCase()!==data.user.email?.toLowerCase())throw Error('Sign in with the email address this workspace invitation was sent to.');
   const local=linkSupabaseUser(data.user);await session(local.id,'supabase');
   if(recovery){const token=id();run('INSERT INTO tokens VALUES(?,?,?,?)',token,local.id,'supabase-reset',new Date(Date.now()+600000).toISOString());return redirect('/?reset='+token);}
-  const invite=jar.get('timecard_auth_invite')?.value||req.nextUrl.searchParams.get('invite');jar.delete('timecard_auth_invite');
+  const invite=workspaceInvite?.token||jar.get('timecard_auth_invite')?.value||req.nextUrl.searchParams.get('invite');jar.delete('timecard_auth_invite');
   return redirect(invite?'/?invite='+encodeURIComponent(invite):'/?auth=verified');
  }catch(e){return redirect('/?auth_error='+encodeURIComponent(e instanceof Error?e.message:'Sign-in could not finish.'));}
 }

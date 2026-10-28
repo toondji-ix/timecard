@@ -6,6 +6,8 @@ import { all,one,run,db,id,now,audit,encrypt,decrypt } from '@/lib/db';
 import { user,session,logout,rateLimit } from '@/lib/auth';
 import { dateAt,leaveDays,plans,safeCsv } from '@/lib/domain';
 import { email,notify } from '@/lib/services';
+import {invitationUrl} from '@/lib/invitations';
+import {sendWorkspaceInvite} from '@/lib/invite-delivery';
 import { faceService,faceConfigured,livenessCredentials } from '@/lib/face';
 import { verifyLocation,writeAttendance } from '@/lib/attendance';
 import { records } from '@/lib/reports';
@@ -87,7 +89,11 @@ export async function POST(req:NextRequest,{params}:{params:Promise<{path:string
   manager(m);const input=z.object({name:str,lat:z.number().min(-90).max(90),lng:z.number().min(-180).max(180),radius:z.number().int().min(10).max(10000)}).parse(b);db.transaction(()=>{if(all('SELECT id FROM locations WHERE org_id=?',o.id).length>=plan(o).locations)throw Error('Multiple work locations are included with Business.');run('INSERT INTO locations VALUES(?,?,?,?,?,?)',id(),o.id,input.name,input.lat,input.lng,input.radius);audit(o.id,u.id,'location.created',input);})();
  }else if(path==='location/delete'){manager(m);run('DELETE FROM locations WHERE id=? AND org_id=?',str.parse(b.id),o.id);audit(o.id,u.id,'location.deleted',{id:b.id});
  }else if(path==='invite'){
-  manager(m);const input=z.object({email:z.union([z.string().email(),z.literal('')]),role:z.enum(['staff','manager']),department:z.string().max(100)}).parse(b);const token=id();db.transaction(()=>{capacity(o);run('INSERT INTO invites(id,org_id,email,role,department,token,expires) VALUES(?,?,?,?,?,?,?)',id(),o.id,input.email,input.role,input.department,token,new Date(Date.now()+7*86400000).toISOString());audit(o.id,u.id,'invite.created',{email:input.email,role:input.role});})();const url=`${appUrl()}/?invite=${token}`;if(input.email){try{await email(input.email,`You're invited to ${o.name}`,`Join your team on Timecard: ${url}`);}catch{return ok({url,message:'Invite created. Email is queued; you can share this link now.'});}}return ok({url});
+  manager(m);const input=z.object({email:z.union([z.string().email(),z.literal('')]),role:z.enum(['staff','manager']),department:z.string().max(100)}).parse(b);const token=id(),url=invitationUrl(token);db.transaction(()=>{capacity(o);run('INSERT INTO invites(id,org_id,email,role,department,token,expires) VALUES(?,?,?,?,?,?,?)',id(),o.id,input.email,input.role,input.department,token,new Date(Date.now()+7*86400000).toISOString());audit(o.id,u.id,'invite.created',{email:input.email,role:input.role});})();
+  if(!input.email)return ok({url,emailStatus:'not_requested'});
+  const emailStatus=await sendWorkspaceInvite(one('SELECT id FROM invites WHERE token=?',token)!.id);
+  const message=emailStatus==='sent'?'Invitation email accepted for delivery through Supabase.':emailStatus==='not_configured'?'Invitation created, but email delivery is not configured. Your administrator needs to configure the server-only Supabase secret key. You can share this link now.':'Invitation created. Email is waiting for delivery; you can share this link now.';
+  return ok({url,emailStatus,message});
  }else if(path==='invite/revoke'){manager(m);run('UPDATE invites SET revoked=1 WHERE id=? AND org_id=?',str.parse(b.id),o.id);audit(o.id,u.id,'invite.revoked',{id:b.id});
  }else if(path==='person'){manager(m);const input=z.object({id:str,role:z.enum(['staff','manager']),department:z.string().max(100)}).parse(b);const member=one('SELECT * FROM memberships WHERE org_id=? AND user_id=? AND active=1',o.id,input.id);if(!member||member.role==='owner')throw Error('The workspace owner cannot be changed here.');run('UPDATE memberships SET role=?,department=? WHERE org_id=? AND user_id=?',input.role,input.department,o.id,input.id);audit(o.id,u.id,'person.updated',input);
  }else if(path==='person/remove'){

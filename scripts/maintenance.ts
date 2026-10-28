@@ -3,6 +3,8 @@ nextEnv.loadEnvConfig(process.cwd());
 const {all,run,id,now,audit,decrypt}=await import('../lib/db');
 const {faceService}=await import('../lib/face');
 const {reconcileBilling}=await import('../lib/billing');
+const {emailConfigured}=await import('../lib/services');
+const {retryWorkspaceInvites}=await import('../lib/invite-delivery');
 await reconcileBilling();
 // Run daily from the same persistent host. Never delete unverified or open attendance.
 for(const org of all('SELECT * FROM organizations')){
@@ -19,7 +21,8 @@ run('DELETE FROM attendance_proofs WHERE created<?',new Date(Date.now()-86400000
 run('DELETE FROM rate_limits WHERE reset<?',Date.now());
 run('DELETE FROM challenges WHERE expires<?',now());
 run('DELETE FROM oidc_states WHERE expires<?',now());
-if(process.env.EMAIL_API_KEY)for(const mail of all('SELECT * FROM outbox WHERE sent=0 ORDER BY created LIMIT 100')){
+await retryWorkspaceInvites();
+if(emailConfigured())for(const mail of all("SELECT * FROM outbox WHERE sent=0 AND subject NOT LIKE 'You''re invited to %' ORDER BY created LIMIT 100")){
  try{const r=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${process.env.EMAIL_API_KEY}`,'Content-Type':'application/json','Idempotency-Key':mail.id},body:JSON.stringify({from:process.env.EMAIL_FROM,to:mail.address,subject:mail.subject,text:mail.body})});if(r.ok)run('UPDATE outbox SET sent=1 WHERE id=?',mail.id);}catch{console.error('Email retry deferred.');}
 }
 run('DELETE FROM outbox WHERE sent=1 AND created<?',new Date(Date.now()-7*86400000).toISOString());
