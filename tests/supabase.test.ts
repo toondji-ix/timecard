@@ -70,6 +70,28 @@ test('workspace creation accepts the deployed HTTPS origin and still rejects for
  try{const state=await call('state?org='+org);assert.equal(state.status,200);assert.equal(state.data.organization.name,input.name);assert.equal(state.data.organization.timezone,'Africa/Lagos');assert.equal(state.data.organization.end_time,'18:00');assert.equal(state.data.membership.role,'owner');assert.equal(state.data.user.id,'existing-local');assert.equal(state.data.leaveTypes.length,4);}finally{db.prepare('DELETE FROM audit_logs WHERE org_id=?').run(org);db.prepare('DELETE FROM leave_types WHERE org_id=?').run(org);db.prepare('DELETE FROM memberships WHERE org_id=?').run(org);db.prepare('DELETE FROM organizations WHERE id=?').run(org);}
 });
 
+test('privacy consent saves from the public HTTPS origin and rejects unsafe or non-consenting requests',async()=>{
+ const membership='existing-membership',before=db.prepare('SELECT consent FROM memberships WHERE id=?').get(membership) as {consent:string|null};
+ for(const headers of [{Origin:'https://attacker.example'},{Origin:renderOrigin,'sec-fetch-site':'cross-site'}] as Record<string,string>[]){const rejected=await call('consent?org=existing-org',{accept:true},browser,headers);assert.equal(rejected.status,403);}
+ assert.equal((await call('consent?org=existing-org',{accept:true},new Map(),{Origin:renderOrigin})).status,401);
+ assert.equal((await call('consent?org=another-workspace',{accept:true},browser,{Origin:renderOrigin})).status,400);
+ assert.equal((await call('consent?org=existing-org',{accept:false},browser,{Origin:renderOrigin})).status,400);
+ assert.equal((db.prepare('SELECT consent FROM memberships WHERE id=?').get(membership) as {consent:string|null}).consent,before.consent);
+ const accepted=await call('consent?org=existing-org',{accept:true},browser,{Origin:renderOrigin});assert.equal(accepted.status,200,JSON.stringify(accepted.data));const state=await call('state?org=existing-org');assert.ok(state.data.membership.consent);assert.ok(Number.isFinite(Date.parse(state.data.membership.consent)));const audit=db.prepare("SELECT * FROM audit_logs WHERE org_id='existing-org' AND action='consent.accepted'").all();assert.equal(audit.length,1);
+});
+
+test('managers can create email and shareable invitations from the public origin while unsafe requests stay blocked',async()=>{
+ const input={email:'new-teammate@example.invalid',role:'staff',department:'Designer'},before=(db.prepare('SELECT count(*) n FROM invites').get() as {n:number}).n;
+ assert.equal((await call('invite?org=existing-org',input,browser,{Origin:'https://attacker.example'})).status,403);
+ assert.equal((await call('invite?org=existing-org',input,new Map(),{Origin:renderOrigin})).status,401);
+ assert.equal((await call('invite?org=another-workspace',input,browser,{Origin:renderOrigin})).status,400);
+ db.prepare("UPDATE memberships SET role='staff' WHERE id='existing-membership'").run();try{const denied=await call('invite?org=existing-org',input,browser,{Origin:renderOrigin});assert.equal(denied.status,400);assert.match(denied.data.error,/Manager access required/);}finally{db.prepare("UPDATE memberships SET role='owner' WHERE id='existing-membership'").run();}
+ assert.equal((db.prepare('SELECT count(*) n FROM invites').get() as {n:number}).n,before);
+ const created=await call('invite?org=existing-org',input,browser,{Origin:renderOrigin});assert.equal(created.status,200,JSON.stringify(created.data));const token=new URL(created.data.url).searchParams.get('invite');assert.ok(token);const saved=db.prepare('SELECT * FROM invites WHERE token=?').get(token) as {org_id:string;email:string;role:string;department:string;expires:string};assert.equal(saved.org_id,'existing-org');assert.equal(saved.email,input.email);assert.equal(saved.role,input.role);assert.equal(saved.department,input.department);assert.ok(Date.parse(saved.expires)>Date.now()+6*86400000);const preview=await call('invite?token='+token);assert.equal(preview.status,200);assert.equal(preview.data.email,input.email);
+ const message=db.prepare('SELECT body FROM outbox WHERE address=?').get(input.email) as {body:string};assert.ok(message.body.includes(created.data.url));
+ const link=await call('invite?org=existing-org',{email:'',role:'manager',department:''},browser,{Origin:renderOrigin});assert.equal(link.status,200);assert.ok(new URL(link.data.url).searchParams.get('invite'));
+});
+
 test('Google uses PKCE, keeps invitation context, and callback errors return to the sign-in screen',async()=>{
  const r=await call('auth/google?invite=invitation-token');assert.equal(r.status,307);const url=new URL(r.location!);assert.equal(url.origin,providerUrl);assert.equal(url.searchParams.get('provider'),'google');assert.equal(url.searchParams.get('code_challenge_method'),'s256');assert.ok(url.searchParams.get('code_challenge'));
  const result=await call('auth/callback?code=mock-code');assert.equal(result.status,307);assert.equal(new URL(result.location!).searchParams.get('invite'),'invitation-token');
