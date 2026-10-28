@@ -9,7 +9,7 @@ import Database from 'better-sqlite3';
 import {hash} from 'bcryptjs';
 
 const renderOrigin='https://timecard-y77q.onrender.com';
-let providerRequests=0;
+let providerRequests=0;let mailFailure:{code:string;status:number;msg:string}|null=null;
 const file=resolve('data/supabase-test-'+randomUUID()+'.sqlite'),base='http://localhost:3118';
 let provider:Server,server:ChildProcess,db:Database.Database,logs='',providerUrl='',newPassword='Long-provider-password!';
 const subject=randomUUID(),address='existing@example.invalid';
@@ -19,9 +19,10 @@ const credentials=()=>({access_token:token(),refresh_token:'mock-refresh-token',
 type Client=Map<string,string>;const browser:Client=new Map();
 async function call(path:string,body?:object,client=browser,extraHeaders:Record<string,string>={}){const r=await fetch(base+'/api/'+path,{redirect:'manual',method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/json',Origin:base}:{}),...extraHeaders,Cookie:Array.from(client).map(([k,v])=>k+'='+v).join('; ')},...(body?{body:JSON.stringify(body)}:{})});for(const c of r.headers.getSetCookie()){const pair=c.split(';')[0],at=pair.indexOf('=');client.set(pair.slice(0,at),pair.slice(at+1));}return {status:r.status,location:r.headers.get('location'),data:r.headers.get('content-type')?.includes('json')?await r.json():null};}
 before(async()=>{
- provider=createServer(async(req,res)=>{providerRequests++;let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{},url=new URL(req.url!,'http://provider');res.setHeader('Content-Type','application/json');
+ provider=createServer(async(req,res)=>{providerRequests++;let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{},url=new URL(req.url!,'http://provider');res.setHeader('Content-Type','application/json');res.setHeader('X-Supabase-Api-Version','2024-01-01');if(mailFailure&&['/auth/v1/signup','/auth/v1/resend','/auth/v1/recover'].includes(url.pathname)){res.statusCode=mailFailure.status;res.end(JSON.stringify(mailFailure));return;}
   if(url.pathname==='/auth/v1/signup'){res.end(JSON.stringify({...account(),email_confirmed_at:null}));return;}
   if(url.pathname==='/auth/v1/token'){
+   if(url.searchParams.get('grant_type')==='pkce'&&(!body.code_verifier||body.auth_code==='expired-code')){res.statusCode=400;res.end(JSON.stringify({code:body.auth_code==='expired-code'?'flow_state_expired':'bad_code_verifier',msg:'Invalid PKCE exchange'}));return;}
    if(url.searchParams.get('grant_type')==='password'&&(body.email!==address||body.password!==newPassword)){res.statusCode=400;res.end(JSON.stringify({code:'invalid_credentials',msg:'Invalid login credentials'}));return;}
    res.end(JSON.stringify(credentials()));return;
   }
@@ -34,7 +35,7 @@ before(async()=>{
   if(['/auth/v1/recover','/auth/v1/resend','/auth/v1/logout'].includes(url.pathname)){res.end('{}');return;}
   res.statusCode=404;res.end('{}');
  });await new Promise<void>(r=>provider.listen(0,'127.0.0.1',r));providerUrl='http://127.0.0.1:'+(provider.address() as {port:number}).port;
- server=spawn(process.execPath,[resolve('node_modules/next/dist/bin/next'),'dev','--port','3118'],{env:{...process.env,NODE_ENV:'development',NEXT_DIST_DIR:'.next-auth-test',DATABASE_PATH:file,TIMECARD_MAINTENANCE:'off',NEXT_PUBLIC_SUPABASE_URL:providerUrl,NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:'sb_publishable_isolated_test',SUPABASE_SECRET_KEY:'',SESSION_SECRET:'isolated-supabase-test-session-secret',APP_URL:base,RENDER_EXTERNAL_URL:renderOrigin,EMAIL_API_KEY:''},windowsHide:true,stdio:['ignore','pipe','pipe']});
+ server=spawn(process.execPath,[resolve('node_modules/next/dist/bin/next'),'dev','--port','3118'],{env:{...process.env,NODE_ENV:'development',NEXT_DIST_DIR:'.next-auth-test',DATABASE_PATH:file,TIMECARD_MAINTENANCE:'off',SUPABASE_URL:providerUrl,SUPABASE_PUBLISHABLE_KEY:'sb_publishable_isolated_test',NEXT_PUBLIC_SUPABASE_URL:'',NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:'',SUPABASE_ANON_KEY:'',NEXT_PUBLIC_SUPABASE_ANON_KEY:'',SUPABASE_SECRET_KEY:'',SESSION_SECRET:'isolated-supabase-test-session-secret',APP_URL:base,RENDER_EXTERNAL_URL:renderOrigin,EMAIL_API_KEY:''},windowsHide:true,stdio:['ignore','pipe','pipe']});
  server.stdout?.on('data',v=>logs=(logs+v).slice(-6000));server.stderr?.on('data',v=>logs=(logs+v).slice(-6000));let ready=false;for(let i=0;i<30;i++){try{if((await fetch(base+'/api/public/config',{signal:AbortSignal.timeout(30000)})).ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,1000));}assert.ok(ready,logs);db=new Database(file);
  db.prepare('INSERT INTO users(id,email,name,password,verified) VALUES(?,?,?,?,1)').run('existing-local',address,'Existing Person',await hash('Old-local-password!',10));
  db.prepare("INSERT INTO organizations(id,name) VALUES('existing-org','Existing workspace')").run();db.prepare("INSERT INTO memberships(id,org_id,user_id,role) VALUES('existing-membership','existing-org','existing-local','owner')").run();
@@ -42,6 +43,12 @@ before(async()=>{
 
 test('foreign browser origins are rejected before reaching Supabase',async()=>{
  const before=providerRequests;for(const path of ['auth/signup','auth/login']){const r=await call(path,{name:'Intruder',email:address,password:newPassword},new Map(),{Origin:'https://attacker.example','x-forwarded-host':'attacker.example','x-forwarded-proto':'https'});assert.equal(r.status,403);assert.equal(r.data.error,'Invalid request origin.');}assert.equal(providerRequests,before);
+});
+
+test('email sender restrictions, throttling and SMTP failures are surfaced instead of reporting success',async()=>{
+ for(const [index,failure] of [{code:'email_address_not_authorized',status:403,msg:'Email address not authorized'},{code:'over_email_send_rate_limit',status:429,msg:'Email rate limit exceeded'},{code:'unexpected_failure',status:500,msg:'Error sending confirmation email'}].entries()){
+  mailFailure=failure;try{for(const path of ['auth/signup','auth/resend']){const r=await call(path,{name:'Email Test',email:`mail-failure-${index}@example.invalid`,password:newPassword});assert.equal(r.status,400);assert.equal(r.data.confirmationRequired,undefined);assert.match(r.data.error,index===0?/custom SMTP/:index===1?/sending limit/:/SMTP settings/);}}finally{mailFailure=null;}
+ }
 });
 
 test('Supabase signup requires confirmation and local-password fallback cannot bypass the provider',async()=>{
@@ -60,6 +67,27 @@ test('Google uses PKCE, keeps invitation context, and callback errors return to 
  const result=await call('auth/callback?code=mock-code');assert.equal(result.status,307);assert.equal(new URL(result.location!).searchParams.get('invite'),'invitation-token');
  const bad=await call('auth/callback?error=access_denied');assert.ok(new URL(bad.location!).searchParams.has('auth_error'));
 });
+test('Google codes returned to the landing URL are exchanged before the landing page renders',async()=>{
+ const fresh=new Map<string,string>();assert.equal((await call('auth/google',undefined,fresh)).status,307);
+ const root=await fetch(base+'/?code=mock-code',{redirect:'manual',headers:{Cookie:Array.from(fresh).map(([k,v])=>k+'='+v).join('; ')}});assert.equal(root.status,307);assert.equal(root.headers.get('cache-control'),'no-store');const callback=new URL(root.headers.get('location')!,base);assert.equal(callback.pathname,'/api/auth/callback');assert.equal(callback.searchParams.get('code'),'mock-code');
+ const done=await call('auth/callback'+callback.search,undefined,fresh);assert.equal(done.status,307);const final=new URL(done.location!);assert.equal(final.searchParams.get('auth'),'verified');assert.ok(!final.searchParams.has('code'));assert.equal((await call('state',undefined,fresh)).status,200);
+});
+
+test('password recovery codes returned to Site URL keep their recovery flow',async()=>{
+ const fresh=new Map<string,string>();assert.equal((await call('auth/reset-request',{email:address},fresh)).status,200);
+ const root=await fetch(base+'/?code=mock-code',{redirect:'manual'});assert.equal(root.status,307);const callback=new URL(root.headers.get('location')!,base);const done=await call('auth/callback'+callback.search,undefined,fresh);assert.equal(done.status,307);const final=new URL(done.location!);assert.ok(final.searchParams.get('reset'));assert.ok(!final.searchParams.has('code'));assert.ok(!final.searchParams.has('auth'));
+});
+
+test('provider server errors on the callback return a visible, safe sign-in error',async()=>{
+ const r=await call('auth/callback?error=server_error&error_code=unexpected_failure&error_description=Unable+to+exchange+external+code%3A+SECRET_CODE');assert.equal(r.status,307);const url=new URL(r.location!);assert.match(url.searchParams.get('auth_error')!,/Client ID and Client Secret/);assert.ok(!r.location!.includes('SECRET_CODE'));assert.ok(!url.searchParams.has('auth'));
+});
+
+test('recovery callbacks distinguish missing browser sessions from expired links',async()=>{
+ const fresh=new Map<string,string>();let r=await call('auth/callback?code=mock-code&flow=recovery',undefined,fresh);assert.match(new URL(r.location!).searchParams.get('auth_error')!,/browser session/);
+ assert.equal((await call('auth/reset-request',{email:address})).status,200);r=await call('auth/callback?code=expired-code&flow=recovery');assert.match(new URL(r.location!).searchParams.get('auth_error')!,/expired or has already been used/);
+ r=await call('auth/callback?error=access_denied&error_code=otp_expired');assert.match(new URL(r.location!).searchParams.get('auth_error')!,/expired or has already been used/);
+});
+
 test('recovery requires its one-time token and invalidates earlier application sessions',async()=>{
  const earlier=new Map(browser);
  assert.equal((await call('auth/reset-request',{email:address})).status,200);

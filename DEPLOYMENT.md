@@ -28,8 +28,8 @@ NODE_VERSION=22
 NODE_ENV=production
 APP_URL=https://YOUR-SERVICE.onrender.com
 DATABASE_PATH=data/timecard.sqlite
-NEXT_PUBLIC_SUPABASE_URL=YOUR_SUPABASE_PROJECT_URL
-NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=YOUR_SUPABASE_PUBLISHABLE_KEY
+SUPABASE_URL=YOUR_SUPABASE_PROJECT_URL
+SUPABASE_PUBLISHABLE_KEY=YOUR_SUPABASE_PUBLISHABLE_KEY
 SESSION_SECRET=YOUR_EXISTING_STABLE_SESSION_SECRET
 DATA_ENCRYPTION_KEY=YOUR_EXISTING_64_HEX_CHARACTER_KEY
 BUSINESS_MONTHLY_AMOUNT=1500000
@@ -39,6 +39,8 @@ TIMECARD_MAINTENANCE=on
 ```
 
 Copy the applicable Paystack test, AWS and Resend variables listed in `.env.example` into Render as well. Keep `SESSION_SECRET` and `DATA_ENCRYPTION_KEY` stable across deploys. Never regenerate the data key if encrypted face identifiers already exist. Supabase account deletion additionally requires server-only `SUPABASE_SECRET_KEY`, which must never use a `NEXT_PUBLIC_` prefix. The publishable key is sufficient for ordinary authentication.
+
+If signup reports missing email verification, check these two Supabase values in **Render → your Web Service → Environment**. Local `.env.local` values are not deployed. Authentication reads the server runtime values above; the older `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` names are also supported. Save the environment changes and redeploy. Production authentication does not fall back to Resend/local signup when Supabase settings are missing.
 
 ## Supabase email and Google setup
 
@@ -62,3 +64,19 @@ Set the Paystack **test** webhook URL to `https://YOUR-SERVICE.onrender.com/api/
 Run the build and tests successfully before deployment. The previous local production build encountered an internal Next.js page-collection error; a cleanup/rebuild was declined. The current Supabase changes need their own successful build before production readiness can be claimed. This document supplies configuration; no Render service or disk has been provisioned.
 
 References: [Render Next.js](https://render.com/docs/deploy-nextjs-app), [persistent disks](https://render.com/docs/disks), [Supabase Google](https://supabase.com/docs/guides/auth/social-sign-in/auth-google), [Supabase redirects](https://supabase.com/docs/guides/auth/redirect-urls).
+
+## Authentication callback troubleshooting
+
+For this configured Supabase project, the authorization redirect inspected from Supabase is `https://qjygegissguhxwhrpifg.supabase.co/auth/v1/callback`. Register this exact URL in **Google Auth Platform → Clients → the Web application client → Authorized redirect URIs**. That client must match the Client ID saved in Supabase's Google provider. This fixes Google's `redirect_uri_mismatch`; the application's `/api/auth/callback` is a separate redirect registered in Supabase, not the Google callback.
+
+Set Supabase Site URL and Render `APP_URL` to the application's public HTTPS origin. Authentication also falls back to Render's server-provided HTTPS URL if APP_URL is absent or still localhost. Production cannot generate localhost reset links. Keep the app callback in Supabase's Redirect URLs.
+
+For password reset across browsers, set the **Reset password** email template in Supabase to use this link (Site URL must be your app origin):
+
+```html
+<a href="{{ .SiteURL }}/api/auth/confirm?token_hash={{ .TokenHash }}&amp;type=recovery">Reset password</a>
+```
+
+The app verifies this recovery token with Supabase and creates a short-lived, single-use application reset token. Standard PKCE links instead require the browser cookies from the browser that requested the reset. Request a fresh email after changing the settings; use only the newest email. A genuinely expired, already-used, or scanner-consumed provider link cannot be revived by the application. Do not share full reset URLs or tokens in logs/chat.
+
+If Supabase returns an authorization code to Site URL as `/?code=...`, authentication middleware forwards it to `/api/auth/callback` before the landing page renders. The callback exchanges the code for verified cookies and returns a code-free URL. Recovery intent is retained from the PKCE flow even if the fallback redirect omitted its query parameter. Continue to allow the canonical callback path in Supabase Redirect URLs.

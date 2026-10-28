@@ -2,12 +2,14 @@ import { createServerClient } from '@supabase/ssr';
 import { createClient, type User } from '@supabase/supabase-js';
 import { cookies } from 'next/headers';
 import { db,one,run,id } from './db';
+import {supabaseConfig,missingSupabaseMessage} from './supabase-config';
 
-export function supabaseConfigured(){const url=process.env.NEXT_PUBLIC_SUPABASE_URL,key=process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;if(!!url!==!!key)throw Error('Configure both the Supabase project URL and publishable key.');return !!(url&&key);}
+export function supabaseConfigured(){return !!supabaseConfig();}
+function config(){const value=supabaseConfig();if(!value)throw Error(missingSupabaseMessage);return value;}
 export async function supabaseServer(){
- if(!supabaseConfigured())throw Error('Supabase authentication is not configured.');
+ const {url,key}=config();
  const jar=await cookies();
- return createServerClient(process.env.NEXT_PUBLIC_SUPABASE_URL!,process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,{
+ return createServerClient(url,key,{
   cookies:{getAll:()=>jar.getAll(),setAll:items=>{for(const {name,value,options} of items)jar.set(name,value,{...options,secure:process.env.NODE_ENV==='production'});}},
  });
 }
@@ -32,7 +34,7 @@ export function linkSupabaseUser(account:User){
 
 // Reauthentication must not replace the current session or its recovery cookies.
 export async function confirmSupabasePassword(email:string,password:string,expectedId:string){
- const client=createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!,process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,{auth:{persistSession:false,autoRefreshToken:false}});
+ const {url,key}=config();const client=createClient(url,key,{auth:{persistSession:false,autoRefreshToken:false}});
  const {data,error}=await client.auth.signInWithPassword({email,password});
  if(error||data.user?.id!==expectedId)throw Error('Your password is incorrect. Google users can set a password using the password-reset email.');
  await client.auth.signOut({scope:'local'});
@@ -40,6 +42,6 @@ export async function confirmSupabasePassword(email:string,password:string,expec
 export function supabaseAdminConfigured(){return !!process.env.SUPABASE_SECRET_KEY;}
 export async function deleteSupabaseUser(uid:string){
  if(!supabaseAdminConfigured())throw Error('Account deletion requires the server-only Supabase secret key. Ask your workspace administrator to finish configuration.');
- const admin=createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!,process.env.SUPABASE_SECRET_KEY!,{auth:{persistSession:false,autoRefreshToken:false}});
+ const admin=createClient(config().url,process.env.SUPABASE_SECRET_KEY!,{auth:{persistSession:false,autoRefreshToken:false}});
  const {error}=await admin.auth.admin.deleteUser(uid);if(error)throw Error('Supabase could not delete your account. Please try again.');
 }
