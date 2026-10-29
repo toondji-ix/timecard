@@ -10,3 +10,5 @@ data/
 .npm-cache/
 
 .next-auth-test/
+
+.next-pg-test/

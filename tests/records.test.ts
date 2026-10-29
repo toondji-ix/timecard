@@ -1,21 +1,31 @@
-import test,{after} from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import {randomUUID} from 'node:crypto';
-import {resolve} from 'node:path';
-import {unlinkSync} from 'node:fs';
-const path=resolve('data/records-test-'+randomUUID()+'.sqlite');process.env.DATABASE_PATH=path;process.env.DATA_ENCRYPTION_KEY='ab'.repeat(32);
-const {db,run,one,encrypt,decrypt}=await import('../lib/db');
-const {writeAttendance,verifyLocation}=await import('../lib/attendance');
-const {records}=await import('../lib/reports');
-const {allowanceFor,validateCalendarDay}=await import('../lib/leave');
-run("INSERT INTO users(id,email,name,password,created) VALUES('u','test@example.invalid','Test Person','unused','2020-01-01')");
-run("INSERT INTO organizations(id,name,timezone) VALUES('org','Test workspace','UTC')");
-run("INSERT INTO memberships(id,org_id,user_id,created) VALUES('m','org','u','2026-10-20')");
-const org=one("SELECT * FROM organizations WHERE id='org'")!;
-test('old accounts do not accumulate absences before joining a workspace',()=>{const rows=records(org,'u',false,new URLSearchParams({start:'2026-10-19',end:'2026-10-21'}));assert.ok(rows.every(r=>r.day>='2026-10-20'));assert.equal(rows.length,2);});
-test('check-in rejects duplicates and checkout retains independent GPS and face evidence',()=>{writeAttendance(org,'u','in',{timestamp:'2026-10-22T09:00:00Z',lat:1,lng:2,score:.96,location:'in-location'});assert.throws(()=>writeAttendance(org,'u','in',{timestamp:'2026-10-22T09:01:00Z'}),/already/);writeAttendance(org,'u','out',{timestamp:'2026-10-22T17:00:00Z',lat:3,lng:4,score:.98,location:'out-location'});const record=one("SELECT * FROM attendance WHERE org_id='org'")!;assert.equal(record.lat,1);assert.equal(record.checkout_lat,3);assert.equal(record.checkout_score,.98);assert.equal(record.checkout_location_id,'out-location');assert.throws(()=>writeAttendance(org,'u','out',{}),/check in first/);});
-test('a currently running break does not inflate worked hours',()=>{writeAttendance(org,'u','in',{timestamp:'2026-10-23T09:00:00Z'});run("UPDATE attendance SET break_start='2026-10-23T12:00:00Z',break_minutes=30 WHERE day='2026-10-23'");const row=records(org,'u',false,new URLSearchParams({start:'2026-10-23',end:'2026-10-23'}))[0];assert.equal(row.total_hours,2.5);});
-test('any containing geofence is accepted, even if the closest centre is outside its smaller fence',()=>{run("INSERT INTO locations VALUES('small','org','Small',0,.001,10)");run("INSERT INTO locations VALUES('large','org','Large',0,.002,500)");assert.equal(verifyLocation('org',{lat:0,lng:0,accuracy:10}).id,'large');assert.throws(()=>verifyLocation('org',{lat:20,lng:20,accuracy:10}),/outside/);assert.throws(()=>verifyLocation('org',{lat:0,lng:0,accuracy:200}),/precise/);assert.throws(()=>verifyLocation('org',{lat:0,lng:0,accuracy:10,mocked:true}),/cannot be verified/);});
-test('face identifiers are encrypted with authentication and tampering is rejected',()=>{const encrypted=encrypt('private-face-id');assert.ok(!encrypted.includes('private-face-id'));assert.equal(decrypt(encrypted),'private-face-id');const parts=encrypted.split('.');parts[1]=(parts[1][0]==='0'?'1':'0')+parts[1].slice(1);assert.throws(()=>decrypt(parts.join('.')));});
-test('individual leave allowance overrides are scoped to workspace, person, type and year',()=>{run("INSERT INTO leave_allowances VALUES('org','u','annual',2026,12)");assert.equal(allowanceFor('org','u',{id:'annual',allowance:20},2026),12);assert.equal(allowanceFor('other','u',{id:'annual',allowance:20},2026),20);assert.equal(allowanceFor('org','u',{id:'annual',allowance:20},2027),20);assert.throws(()=>validateCalendarDay('2026-02-30'),/valid/);});
-after(()=>{db.close();for(const suffix of ['','-wal','-shm'])try{unlinkSync(path+suffix);}catch{}});
+import { randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
+import { unlinkSync } from 'node:fs';
+const path = resolve('data/records-test-' + randomUUID() + '.sqlite');
+process.env.DATABASE_PATH = path;
+process.env.DATA_ENCRYPTION_KEY = 'ab'.repeat(32);
+Object.assign(process.env,{DATABASE_URL:'',DATABASE_TEST_PGLITE_PATH:'',NODE_ENV:'test'});
+const { db, run, one, encrypt, decrypt } = await import('../lib/db');
+const { writeAttendance, verifyLocation } = await import('../lib/attendance');
+const { records } = await import('../lib/reports');
+const { allowanceFor, validateCalendarDay } = await import('../lib/leave');
+await run("INSERT INTO users(id,email,name,password,created) VALUES('u','test@example.invalid','Test Person','unused','2020-01-01')");
+await run("INSERT INTO organizations(id,name,timezone) VALUES('org','Test workspace','UTC')");
+await run("INSERT INTO memberships(id,org_id,user_id,created) VALUES('m','org','u','2026-10-20')");
+const org = (await one("SELECT * FROM organizations WHERE id='org'"))!;
+test('old accounts do not accumulate absences before joining a workspace', async () => { const rows = await records(org, 'u', false, new URLSearchParams({ start: '2026-10-19', end: '2026-10-21' })); assert.ok(rows.every(r => r.day >= '2026-10-20')); assert.equal(rows.length, 2); });
+test('check-in rejects duplicates and checkout retains independent GPS and face evidence', async () => { await writeAttendance(org, 'u', 'in', { timestamp: '2026-10-22T09:00:00Z', lat: 1, lng: 2, score: .96, location: 'in-location' }); await assert.rejects(async () => await writeAttendance(org, 'u', 'in', { timestamp: '2026-10-22T09:01:00Z' }), /already/); await writeAttendance(org, 'u', 'out', { timestamp: '2026-10-22T17:00:00Z', lat: 3, lng: 4, score: .98, location: 'out-location' }); const record = (await one("SELECT * FROM attendance WHERE org_id='org'"))!; assert.equal(record.lat, 1); assert.equal(record.checkout_lat, 3); assert.equal(record.checkout_score, .98); assert.equal(record.checkout_location_id, 'out-location'); await assert.rejects(async () => await writeAttendance(org, 'u', 'out', {}), /check in first/); });
+test('a currently running break does not inflate worked hours', async () => { await writeAttendance(org, 'u', 'in', { timestamp: '2026-10-23T09:00:00Z' }); await run("UPDATE attendance SET break_start='2026-10-23T12:00:00Z',break_minutes=30 WHERE day='2026-10-23'"); const row = (await records(org, 'u', false, new URLSearchParams({ start: '2026-10-23', end: '2026-10-23' })))[0]; assert.equal(row.total_hours, 2.5); });
+test('any containing geofence is accepted, even if the closest centre is outside its smaller fence', async () => { await run("INSERT INTO locations VALUES('small','org','Small',0,.001,10)"); await run("INSERT INTO locations VALUES('large','org','Large',0,.002,500)"); assert.equal((await verifyLocation('org', { lat: 0, lng: 0, accuracy: 10 })).id, 'large'); await assert.rejects(async () => await verifyLocation('org', { lat: 20, lng: 20, accuracy: 10 }), /outside/); await assert.rejects(async () => await verifyLocation('org', { lat: 0, lng: 0, accuracy: 200 }), /precise/); await assert.rejects(async () => await verifyLocation('org', { lat: 0, lng: 0, accuracy: 10, mocked: true }), /cannot be verified/); });
+test('face identifiers are encrypted with authentication and tampering is rejected', () => { const encrypted = encrypt('private-face-id'); assert.ok(!encrypted.includes('private-face-id')); assert.equal(decrypt(encrypted), 'private-face-id'); const parts = encrypted.split('.'); parts[1] = (parts[1][0] === '0' ? '1' : '0') + parts[1].slice(1); assert.throws(() => decrypt(parts.join('.'))); });
+test('individual leave allowance overrides are scoped to workspace, person, type and year', async () => { await run("INSERT INTO leave_allowances VALUES('org','u','annual',2026,12)"); assert.equal(await allowanceFor('org', 'u', { id: 'annual', allowance: 20 }, 2026), 12); assert.equal(await allowanceFor('other', 'u', { id: 'annual', allowance: 20 }, 2026), 20); assert.equal(await allowanceFor('org', 'u', { id: 'annual', allowance: 20 }, 2027), 20); assert.throws(() => validateCalendarDay('2026-02-30'), /valid/); });
+after(async () => {
+    await db.close();
+    for (const suffix of ['', '-wal', '-shm'])
+        try {
+            unlinkSync(path + suffix);
+        }
+        catch { }
+});

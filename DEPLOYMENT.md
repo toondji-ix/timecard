@@ -9,15 +9,29 @@ Connect the repository and create a **Web Service**, using the Node runtime.
 | Setting | Value |
 | --- | --- |
 | Root directory | Directory containing `package.json`; leave blank if it is at the repository root |
-| Build command | `npm ci && npm run build` |
+| Build command | `npm ci --include=dev && npm run build` |
 | Start command | `npm run start -- --hostname 0.0.0.0 --port $PORT` |
 | Node version environment variable | `NODE_VERSION=22` |
-| Instances | One, while using SQLite |
+| Instance type | Free, with Supabase PostgreSQL |
 | Health check path | `/api/public/config` |
 
-Choose a service plan that supports a persistent disk. With the application at the repository root, mount the disk at `/opt/render/project/src/data`. Set `DATABASE_PATH=data/timecard.sqlite`. If you specify a Root Directory subfolder, include that subfolder in the disk mount path. The relative database path stays the same. Backups under `data/backups` will also reside on this disk.
+Use the existing Supabase PostgreSQL database for workspace storage. No Render disk is needed. Production Render refuses temporary SQLite when DATABASE_URL is missing.
 
-The disk is available only at runtime. The build can create a temporary database in its own `data` folder; the mounted disk replaces that folder at runtime. Schema migrations run when the server opens its persistent database. Do not run SQLite migrations against the disk in a pre-deploy command. Use the same persistent disk and encryption key when restoring existing data; deployment does not automatically upload the local database.
+In Supabase **Connect**, select **Transaction pooler**, copy the PostgreSQL URI and replace the password placeholder. Save it as server-only `DATABASE_URL` in **Render Environment**. Use the database password, not the publishable API key; URL-encode special characters in the password. The app uses verified TLS, a small connection pool and no named prepared statements. Never use a NEXT_PUBLIC_ prefix for this secret.
+
+The first runtime connection creates tables in the private `timecard` schema, preserving Supabase's `auth` tables. Schema changes are additive and serialized. The database user needs schema/table creation permission. Builds do not connect to the database. The `/api/public/config` health check verifies runtime database initialization.
+
+After deploying, create a workspace, sign out and in, then restart the Render service and verify the same workspace appears. Records live independently of Render's filesystem. Free services still sleep: maintenance only runs while awake. For guaranteed cleanup and retries, run `npm run maintenance` with a separate scheduler and the same environment.
+
+### Import existing SQLite records
+
+If an existing SQLite backup is available, stop source writes, retain the original DATA_ENCRYPTION_KEY and import before creating any new records in PostgreSQL:
+
+```powershell
+npm run migrate:sqlite -- path/to/timecard.sqlite
+```
+
+Run from a trusted machine with the destination DATABASE_URL configured locally. The importer preserves IDs, memberships and encrypted identifiers in one transaction. It refuses a nonempty destination and rolls back failed imports. Keep the source backup until verified. Already erased Render files cannot be recovered by this migration.
 
 ## Environment
 
@@ -27,7 +41,7 @@ Enter variables in Render's **Environment** settings. `.env.local` is ignored an
 NODE_VERSION=22
 NODE_ENV=production
 APP_URL=https://YOUR-SERVICE.onrender.com
-DATABASE_PATH=data/timecard.sqlite
+DATABASE_URL=YOUR_SUPABASE_TRANSACTION_POOLER_URI
 SUPABASE_URL=YOUR_SUPABASE_PROJECT_URL
 SUPABASE_PUBLISHABLE_KEY=YOUR_SUPABASE_PUBLISHABLE_KEY
 SESSION_SECRET=YOUR_EXISTING_STABLE_SESSION_SECRET
@@ -53,17 +67,17 @@ Standard Supabase templates use PKCE links, which should be opened in the browse
 
 Existing local account IDs and memberships are preserved when a verified Supabase identity signs in with the same email. Local password hashes are not bulk-imported. Existing users need a Supabase identity with that email; already registered Supabase users can reset their password. Google users can use **Profile → Account and ownership → Send password setup email** before password-protected ownership transfer or deletion. Account deletion requires the server-only secret key and fails before deleting local data when that key is absent.
 
-Authentication uses cookie-backed Supabase SSR clients in API handlers, which validate the user and refresh tokens. A signed, versioned application cookie also preserves application-side session revocation on password reset. Workspace permissions remain in local membership records. Enterprise OIDC remains a separate sign-in path.
+Authentication uses cookie-backed Supabase SSR clients in API handlers, which validate the user and refresh tokens. A signed, versioned application cookie also preserves application-side session revocation on password reset. Workspace permissions remain in application membership records stored in PostgreSQL. Enterprise OIDC remains a separate sign-in path.
 
-The configured Supabase project accepted its publishable key in a read-only settings check: email and email confirmation were enabled; Google was disabled. No live signup, email-delivery or Google consent test was performed.
+Authentication and storage use separate settings: the Supabase URL/publishable key handles authentication; DATABASE_URL handles business records.
 
 ## Other callbacks and verification
 
 Set the Paystack **test** webhook URL to `https://YOUR-SERVICE.onrender.com/api/billing/webhook`. AWS face verification still requires its region, IAM credentials and liveness role. Supabase sends authentication and workspace invitation emails through its configured SMTP. The existing Resend mailer remains for leave notifications and sales email.
 
-Run the build and tests successfully before deployment. The previous local production build encountered an internal Next.js page-collection error; a cleanup/rebuild was declined. The current Supabase changes need their own successful build before production readiness can be claimed. This document supplies configuration; no Render service or disk has been provisioned.
+Local PostgreSQL tests use an isolated embedded PostgreSQL engine and do not contact live Supabase or send real emails. Verify the live Render connection after deployment; DATABASE_URL is currently stored only in Render.
 
-References: [Render Next.js](https://render.com/docs/deploy-nextjs-app), [persistent disks](https://render.com/docs/disks), [Supabase Google](https://supabase.com/docs/guides/auth/social-sign-in/auth-google), [Supabase redirects](https://supabase.com/docs/guides/auth/redirect-urls).
+References: [Render free storage](https://render.com/docs/free), [Supabase PostgreSQL connections](https://supabase.com/docs/guides/database/connecting-to-postgres), [Supabase Google](https://supabase.com/docs/guides/auth/social-sign-in/auth-google).
 
 ## Authentication callback troubleshooting
 

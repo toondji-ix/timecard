@@ -1,0 +1,76 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Timecard Render backend identity and restricted Face Liveness streaming role. Does not create access keys or store photos.",
+  "Rules": {
+    "SupportedRegion": {
+      "Assertions": [{
+        "Assert": {"Fn::Equals": [{"Ref": "AWS::Region"}, "eu-west-1"]},
+        "AssertDescription": "Deploy this setup in Europe (Ireland), eu-west-1, matching Timecard's AWS_REGION."
+      }]
+    }
+  },
+  "Resources": {
+    "BackendUser": {
+      "Type": "AWS::IAM::User",
+      "Properties": {"Tags": [{"Key": "Application", "Value": "Timecard"}]}
+    },
+    "LivenessRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "Description": "Temporary browser credentials for Timecard camera streaming only",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{"Effect": "Allow", "Principal": {"AWS": {"Fn::GetAtt": ["BackendUser", "Arn"]}}, "Action": "sts:AssumeRole"}]
+        },
+        "Policies": [{
+          "PolicyName": "CameraStreamingOnly",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Action": "rekognition:StartFaceLivenessSession",
+              "Resource": "*",
+              "Condition": {"StringEquals": {"aws:RequestedRegion": {"Ref": "AWS::Region"}}}
+            }]
+          }
+        }]
+      }
+    },
+    "BackendPermissions": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "TimecardFaceBackend",
+        "Users": [{"Ref": "BackendUser"}],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "LivenessAndCollectionCreation",
+              "Effect": "Allow",
+              "Action": ["rekognition:CreateFaceLivenessSession", "rekognition:GetFaceLivenessSessionResults", "rekognition:CreateCollection"],
+              "Resource": "*",
+              "Condition": {"StringEquals": {"aws:RequestedRegion": {"Ref": "AWS::Region"}}}
+            },
+            {
+              "Sid": "TimecardFaceCollections",
+              "Effect": "Allow",
+              "Action": ["rekognition:IndexFaces", "rekognition:SearchFacesByImage", "rekognition:DeleteFaces"],
+              "Resource": {"Fn::Sub": "arn:${AWS::Partition}:rekognition:${AWS::Region}:${AWS::AccountId}:collection/timecard-*"}
+            },
+            {
+              "Sid": "AssumeCameraRole",
+              "Effect": "Allow",
+              "Action": "sts:AssumeRole",
+              "Resource": {"Fn::GetAtt": ["LivenessRole", "Arn"]}
+            }
+          ]
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "BackendUserName": {"Description": "Create the Render access key for this IAM user", "Value": {"Ref": "BackendUser"}},
+    "LivenessRoleArn": {"Description": "Render AWS_LIVENESS_ROLE_ARN", "Value": {"Fn::GetAtt": ["LivenessRole", "Arn"]}},
+    "Region": {"Description": "Render AWS_REGION", "Value": {"Ref": "AWS::Region"}}
+  }
+}

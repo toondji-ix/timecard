@@ -1,6 +1,6 @@
 # Timecard
 
-A responsive attendance workspace implementing the supplied Smart Time Tracking PRD. Next.js, React and TypeScript; durable SQLite; AWS Rekognition face verification; Supabase authentication and invitation email; Resend notifications; Paystack test subscriptions.
+A responsive attendance workspace implementing the supplied Smart Time Tracking PRD. Next.js, React and TypeScript; Supabase PostgreSQL storage; AWS Rekognition face verification; Supabase authentication and invitation email; Resend notifications; Paystack test subscriptions.
 
 ## Start locally
 
@@ -74,16 +74,20 @@ Set `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` and `OIDC_WORKSPACE_ID
 
 ## Persistence, retention and backups
 
-`data/timecard.sqlite` uses WAL and a persistent local volume. `DATABASE_PATH` can select a different database. Schema migrations are additive. Do not deploy this database to ephemeral serverless storage or multiple independent application instances. Managed PostgreSQL is the recommended next storage target for multi-instance hosting.
+Set server-only `DATABASE_URL` to the existing Supabase PostgreSQL Transaction pooler URI. Workspaces, user mappings, memberships, attendance and invitations live in the private `timecard` schema and survive Render restarts. Tables initialize on the first runtime connection. Render can stay on its free Web Service plan without a disk. See [DEPLOYMENT.md](DEPLOYMENT.md) for deployment and import steps.
 
-The persistent Node host starts maintenance after 30 seconds and runs it hourly with a database lease. It removes expired completed attendance, deletes expired AWS vectors before local template removal, expires session proofs/tokens and retries email/billing reconciliation. Set `TIMECARD_MAINTENANCE=off` only if an external scheduler runs `npm run maintenance` instead. Manager Settings also provides a deliberate attendance retention cleanup action.
+Local development and isolated tests use SQLite at `DATABASE_PATH` (default `data/timecard.sqlite`) when DATABASE_URL is empty. Production Render refuses this temporary fallback. Explicit SQLite hosting requires DATABASE_DRIVER=sqlite, a persistent disk and one instance.
+
+Maintenance starts after 30 seconds and runs hourly with a database lease. It cleans expired attendance/vectors/tokens and retries email/billing reconciliation. Free Render services sleep, so background work is not guaranteed while idle. An external scheduler can run the existing maintenance command with the same database/environment. Set TIMECARD_MAINTENANCE=off to disable the in-process timer in that setup.
 
 ```powershell
 npm run backup
 npm run maintenance
+# Only for an available SQLite source and an empty PostgreSQL destination:
+npm run migrate:sqlite -- path/to/timecard.sqlite
 ```
 
-Backups use SQLite's online backup API. Store the database, backups and encryption keys securely, on encrypted storage, with matching retention. SQLite itself does not encrypt the whole database; the host must provide volume encryption and HTTPS. Keep the application stopped when restoring a backup into its configured database path. Backup lifecycle, production monitoring and deployment infrastructure require host configuration; no public deployment or legal-compliance certification is claimed.
+PostgreSQL backups are consistent JSON logical snapshots; SQLite uses its online backup API. Copy backups outside Render's ephemeral filesystem and store them securely with matching retention. Managed database backups or pg_dump are recommended for operational recovery. Preserve DATA_ENCRYPTION_KEY across migration and restore. The importer retains IDs and refuses a nonempty destination. Already erased files cannot be recovered by this migration.
 
 ## Offline behavior
 
@@ -103,6 +107,6 @@ The suite covers domain boundaries, real HTTP onboarding and tenancy, invitation
 
 Optional desktop/mobile QA uses an installed Edge browser, `scripts/visual-qa.ts`, and lightweight `playwright-core`/`@axe-core/playwright` packages under ignored `.verify`. It creates an isolated test database and removes it afterward. Captures and accessibility results go to `.impeccable/review`. Test fixtures are not real staff or shipped application data.
 
-Latest local verification: 19 domain, billing and HTTP integration tests passed across separate runs; the preceding production build passed. The final rebuild after the scoped CSS correction compiled and passed type checks, then failed in Next.js page collection with `Invariant: no direct app page entry found for /_not-found`. Clearing generated `.next` output and retrying was declined, so final build confirmation remains outstanding. Backup and maintenance commands passed. The filtered Business XLSX download was opened and checked. Five sampled manager/mobile/profile/map screens had zero automated axe violations; map keyboard activation and the scoped mobile table overflow correction passed browser checks. This is sampled verification, not full WCAG certification.
+Latest storage-migration verification: 76 automated tests passed across the full regression suite and the added PostgreSQL HTTP/import checks. PostgreSQL checks cover workspace creation, consent, invitations, sign-out/sign-in identity, close/reopen persistence, transaction rollback and SQLite import/nonempty refusal/backups. Provider responses are mocked; PostgreSQL checks use an isolated embedded engine. Type checking and the production build passed. The live Supabase database connection still needs verification after deployment because its DATABASE_URL is saved only in Render.
 
 AWS, Resend delivery and enterprise IdP live checks remain dependent on their credentials. Performance targets and WCAG conformance must be assessed at the tested scope rather than assumed from the source.

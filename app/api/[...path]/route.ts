@@ -1,144 +1,584 @@
-import { NextRequest,NextResponse } from 'next/server';
-import { compare,hash } from 'bcryptjs';
-import { createHmac,timingSafeEqual } from 'node:crypto';
+import { NextRequest, NextResponse } from 'next/server';
+import { compare, hash } from 'bcryptjs';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import { all,one,run,db,id,now,audit,encrypt,decrypt } from '@/lib/db';
-import { user,session,logout,rateLimit } from '@/lib/auth';
-import { dateAt,leaveDays,plans,safeCsv } from '@/lib/domain';
-import { email,notify } from '@/lib/services';
-import {invitationUrl} from '@/lib/invitations';
-import {sendWorkspaceInvite} from '@/lib/invite-delivery';
-import { faceService,faceConfigured,livenessCredentials } from '@/lib/face';
-import { verifyLocation,writeAttendance } from '@/lib/attendance';
+import { all, one, run, db, id, now, audit, encrypt, decrypt } from '@/lib/db';
+import { user, session, logout, rateLimit } from '@/lib/auth';
+import { dateAt, leaveDays, plans, safeCsv } from '@/lib/domain';
+import { email, notify } from '@/lib/services';
+import { invitationUrl } from '@/lib/invitations';
+import { sendWorkspaceInvite } from '@/lib/invite-delivery';
+import { faceService, faceConfigured, livenessCredentials } from '@/lib/face';
+import { verifyLocation, writeAttendance } from '@/lib/attendance';
 import { records } from '@/lib/reports';
-import {paystack,createCheckout,verifyPayment,syncSeats,verifiedEvent,handleBillingEvent,businessPrice,businessPriceLabel} from '@/lib/billing';
-import {allowanceFor,validateCalendarDay} from '@/lib/leave';
-import {beginSso,finishSso,ssoConfigured} from '@/lib/oidc';
-import {supabaseAuthGet,supabaseAuthPost} from '@/lib/supabase-auth';
-import {supabaseConfigured,confirmSupabasePassword,deleteSupabaseUser,supabaseAdminConfigured} from '@/lib/supabase';
-import {validAuthOrigin} from '@/lib/auth-origin';
-export const runtime='nodejs';
-const str=z.string().trim().min(1).max(500),day=z.string().regex(/^\d{4}-\d{2}-\d{2}$/),time=z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
-const appUrl=()=>process.env.APP_URL||'http://localhost:3000';
-const ok=(data:object={})=>NextResponse.json({ok:true,...data},{headers:{'Cache-Control':'no-store'}});
-const fail=(message:string,status=400)=>NextResponse.json({error:message},{status});
-function manager(m:any){if(!m||!['owner','manager'].includes(m.role))throw Error('Manager access required.');}
-function plan(o:any){return plans[o.plan as keyof typeof plans]||plans.free;}
-async function context(req:NextRequest){const u=await user();if(!u)throw Error('Please sign in.');const org=req.nextUrl.searchParams.get('org');const m=org?one('SELECT * FROM memberships WHERE user_id=? AND org_id=? AND active=1',u.id,org):one('SELECT * FROM memberships WHERE user_id=? AND active=1 ORDER BY rowid LIMIT 1',u.id);return {u,m,o:m?one('SELECT * FROM organizations WHERE id=?',m.org_id):null};}
-async function sendToken(uid:string,address:string,kind:string){const t=id();run('INSERT INTO tokens VALUES(?,?,?,?)',t,uid,kind,new Date(Date.now()+3600000).toISOString());await email(address,kind==='verify'?'Verify your Timecard email':'Reset your Timecard password',`${appUrl()}/?${kind}=${t}`);}
-function capacity(o:any){const count=one('SELECT COUNT(*) n FROM memberships WHERE org_id=? AND active=1',o.id)!.n;const pending=one('SELECT COUNT(*) n FROM invites WHERE org_id=? AND revoked=0 AND accepted=0 AND expires>?',o.id,now())!.n;if(count+pending>=plan(o).limit)throw Error('Your workspace has reached its staff limit. Upgrade to invite more people.');}
-async function managersNotify(org:string,message:string){for(const p of all("SELECT user_id FROM memberships WHERE org_id=? AND role IN ('owner','manager')",org))await notify(org,p.user_id,message);}
-function error(e:unknown){if(e instanceof z.ZodError)return fail(e.errors.map(x=>`${x.path.join('.')}: ${x.message}`).join('; '));const m=e instanceof Error?e.message:'Something went wrong.';return fail(m.includes('UNIQUE constraint')?'This account or record already exists.':m,m==='Please sign in.'?401:400);}
-export async function GET(req:NextRequest,{params}:{params:Promise<{path:string[]}>}){try{
- const path=(await params).path.join('/');
- const providerResponse=await supabaseAuthGet(req,path);if(providerResponse)return providerResponse;
- if(path==='auth/sso')return await beginSso();
- if(path==='auth/sso/callback')return await finishSso(req);
- if(path==='public/config')return ok({sso:ssoConfigured(),supabase:supabaseConfigured(),pricing:{label:businessPriceLabel(),amount:businessPrice.amount,currency:businessPrice.currency,freeLimit:plans.free.limit,businessLimit:plans.business.limit}});
- if(path==='invite'){const invite=one('SELECT i.email,i.role,i.department,o.name FROM invites i JOIN organizations o ON o.id=i.org_id WHERE i.token=? AND i.revoked=0 AND i.accepted=0 AND i.expires>?',req.nextUrl.searchParams.get('token'),now());return invite?ok(invite):fail('This invite has expired or was revoked.',404);}
- const {u,m,o}=await context(req);
- if(path==='state'){
-  const workspaces=all('SELECT o.id,o.name,m.role FROM organizations o JOIN memberships m ON m.org_id=o.id WHERE m.user_id=? AND m.active=1',u.id);
-  if(!m||!o)return ok({user:u,workspaces,organization:null});
-  const isManager=['owner','manager'].includes(m.role),today=dateAt(now(),o.timezone);
-  return ok({billing:one('SELECT status,cancel_at_period_end,quantity FROM subscriptions WHERE org_id=?',o.id),leaveAllowances:all('SELECT * FROM leave_allowances WHERE org_id=?'+(isManager?'':' AND user_id=?'),o.id,...(isManager?[]:[u.id])),user:u,membership:m,organization:o,workspaces,locations:all('SELECT * FROM locations WHERE org_id=?',o.id),faceEnrolled:!!one('SELECT user_id FROM face_templates WHERE user_id=?',`${o.id}:${u.id}`),faceConfigured:faceConfigured(),personal:all('SELECT * FROM attendance WHERE org_id=? AND user_id=? ORDER BY day DESC LIMIT 60',o.id,u.id),notifications:all('SELECT * FROM notifications WHERE user_id=? AND org_id=? ORDER BY created DESC LIMIT 30',u.id,o.id),leaveTypes:all('SELECT * FROM leave_types WHERE org_id=?',o.id),leaveRequests:all(`SELECT r.*,u.name,t.name type_name FROM leave_requests r JOIN users u ON u.id=r.user_id JOIN leave_types t ON t.id=r.type_id WHERE r.org_id=? ${isManager?'':'AND r.user_id=?'} ORDER BY r.created DESC`,o.id,...(isManager?[]:[u.id])),people:isManager?all('SELECT u.id,u.name,u.email,m.role,m.department,m.consent FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.org_id=? AND m.active=1',o.id):[],invites:isManager?all('SELECT * FROM invites WHERE org_id=? ORDER BY rowid DESC',o.id):[],manualRequests:all(`SELECT r.*,u.name FROM manual_requests r JOIN users u ON u.id=r.user_id WHERE r.org_id=? ${isManager?'':'AND r.user_id=?'} ORDER BY created DESC`,o.id,...(isManager?[]:[u.id])),today:isManager?records(o,u.id,true,new URLSearchParams({start:today,end:today})):[],audit:isManager?all('SELECT a.*,u.name FROM audit_logs a JOIN users u ON u.id=a.user_id WHERE a.org_id=? ORDER BY created DESC LIMIT 100',o.id):[],planLimit:plan(o).limit===Infinity?null:plan(o).limit});
- }
- if(!m||!o)throw Error('Create or join a workspace first.');
- if(path==='records')return ok({rows:records(o,u.id,['owner','manager'].includes(m.role)&&req.nextUrl.searchParams.get('personal')!=='1',req.nextUrl.searchParams)});
- if(path==='export'){
-  const format=req.nextUrl.searchParams.get('format')||'csv';if(!['csv','xlsx'].includes(format))throw Error('Choose CSV or XLSX.');if(format==='xlsx'&&!plan(o).xlsx)throw Error('XLSX exports are included with Business.');
-  const rows=records(o,u.id,['owner','manager'].includes(m.role)&&req.nextUrl.searchParams.get('personal')!=='1',req.nextUrl.searchParams);
-  const columns=['Staff name','Date','Check-in','Check-out','Total hours','Status','Location name','Late flag','Leave type','Approval notes'];
-  const data=rows.map(r=>[r.name,r.day,r.check_in||'',r.check_out||'',Number(r.total_hours.toFixed(2)),r.status,r.location_name||'',r.late?'Yes':'No',r.leave_type||'',r.notes||'']);audit(o.id,u.id,'report.export',{format,count:rows.length});
-  if(format==='xlsx'){const ExcelJS=(await import('exceljs')).default;const book=new ExcelJS.Workbook();const sheet=book.addWorksheet('Attendance');sheet.addRow(columns);sheet.addRows(data);sheet.getRow(1).font={bold:true};sheet.columns.forEach(c=>c.width=22);const buffer=await book.xlsx.writeBuffer();return new NextResponse(new Uint8Array(buffer as ArrayBuffer),{headers:{'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','Content-Disposition':'attachment; filename="timecard-report.xlsx"','Cache-Control':'no-store'}});}
-  return new NextResponse('\uFEFF'+[columns,...data].map(row=>row.map(safeCsv).join(',')).join('\r\n'),{headers:{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="timecard-report.csv"','Cache-Control':'no-store'}});
- }
- return fail('Not found',404);
-}catch(e){return error(e);}}
-export async function POST(req:NextRequest,{params}:{params:Promise<{path:string[]}>}){try{
- const path=(await params).path.join('/');
- if(path==='billing/webhook')return await webhook(req);
- if(!validAuthOrigin(req))return fail('Invalid request origin.',403);
- if(Number(req.headers.get('content-length')||0)>100000)return fail('Request is too large.',413);
- const b=await req.json();
- const providerResponse=await supabaseAuthPost(path,b);if(providerResponse)return providerResponse;
- if(path==='auth/logout'){await logout();return ok();}
- if(path==='auth/signup'){
-  const input=z.object({name:str,email:z.string().email().max(254),password:z.string().min(10).max(128)}).parse(b);rateLimit('signup:'+input.email.toLowerCase(),5);
-  if(process.env.NODE_ENV==='production'&&!process.env.EMAIL_API_KEY)throw Error('Email verification must be configured before accounts can be created.');
-  const uid=id();run('INSERT INTO users(id,email,name,password) VALUES(?,?,?,?)',uid,input.email.toLowerCase(),input.name,await hash(input.password,12));await session(uid);try{await sendToken(uid,input.email,'verify');}catch{return ok({message:'Your account is ready. Verification email is queued; you can resend it from the next screen.'});}return ok({message:'Check your email to verify your account.'});
- }
- if(path==='auth/login'){const input=z.object({email:z.string().email(),password:z.string().max(128)}).parse(b);rateLimit('login:'+input.email.toLowerCase());const u=one('SELECT * FROM users WHERE email=?',input.email.toLowerCase());if(!u||!await compare(input.password,u.password))throw Error('Email or password is incorrect.');await session(u.id);return ok();}
- if(path==='auth/reset-request'){const address=z.string().email().parse(b.email);rateLimit('reset:'+address,3);const u=one('SELECT * FROM users WHERE email=?',address.toLowerCase());if(u)await sendToken(u.id,address,'reset');return ok({message:'If this account exists, a reset link has been sent.'});}
- if(path==='auth/verify'||path==='auth/reset'){const kind=path.split('/')[1],token=one('SELECT * FROM tokens WHERE id=? AND kind=? AND expires>?',str.parse(b.token),kind,now());if(!token)throw Error('This link is invalid or has expired.');if(kind==='verify')run('UPDATE users SET verified=1 WHERE id=?',token.user_id);else{run('UPDATE users SET password=?,auth_version=auth_version+1 WHERE id=?',await hash(z.string().min(10).max(128).parse(b.password),12),token.user_id);await logout();}run('DELETE FROM tokens WHERE user_id=? AND kind=?',token.user_id,kind);return ok();}
- if(path==='sales'){const input=z.object({name:str,email:z.string().email(),company:str,message:str}).parse(b);rateLimit('sales:'+input.email,3);if(!process.env.SALES_EMAIL)throw Error('The sales contact is not configured yet.');await email(process.env.SALES_EMAIL,`Enterprise enquiry: ${input.company}`,`${input.name}\n${input.email}\n${input.message}`);return ok({message:'Thanks. Our team will be in touch.'});}
- const {u,m,o}=await context(req);
- if(path==='auth/resend'){rateLimit('verify:'+u.id,3);await sendToken(u.id,u.email,'verify');return ok();}
- if(!u.verified)throw Error('Please verify your email before continuing.');
- if(path==='workspace'){
-  const input=z.object({name:str,timezone:str,start_time:time,end_time:time}).parse(b);new Intl.DateTimeFormat('en',{timeZone:input.timezone}).format();if(input.start_time>=input.end_time)throw Error('Workday end must be after start.');const org=id();
-  db.transaction(()=>{run('INSERT INTO organizations(id,name,timezone,start_time,end_time) VALUES(?,?,?,?,?)',org,input.name,input.timezone,input.start_time,input.end_time);run('INSERT INTO memberships(id,org_id,user_id,role) VALUES(?,?,?,?)',id(),org,u.id,'owner');for(const [name,allowance] of [['Annual',20],['Sick',10],['Unpaid',0],['Other',0]])run('INSERT INTO leave_types VALUES(?,?,?,?)',id(),org,name,allowance);audit(org,u.id,'workspace.created',{name:input.name});})();return ok({org});
- }
- if(path==='invite/accept'){
-  const token=str.parse(b.token);db.transaction(()=>{const invite=one('SELECT * FROM invites WHERE token=? AND revoked=0 AND accepted=0 AND expires>?',token,now());if(!invite)throw Error('This invite has expired or was revoked.');if(invite.email&&invite.email.toLowerCase()!==u.email.toLowerCase())throw Error('Sign in with the email this invitation was sent to.');const org=one('SELECT * FROM organizations WHERE id=?',invite.org_id)!;if(one('SELECT COUNT(*) n FROM memberships WHERE org_id=? AND active=1',org.id)!.n>=plan(org).limit)throw Error('This workspace has reached its staff limit.');run('INSERT INTO memberships(id,org_id,user_id,role,department) VALUES(?,?,?,?,?) ON CONFLICT(org_id,user_id) DO UPDATE SET role=excluded.role,department=excluded.department,active=1,ended=NULL,created=CURRENT_TIMESTAMP WHERE memberships.active=0',id(),org.id,u.id,invite.role,invite.department);run('UPDATE invites SET accepted=1 WHERE id=?',invite.id);audit(org.id,u.id,'invite.accepted',{invite:invite.id});})();const accepted=one('SELECT org_id FROM invites WHERE token=?',token)!;await syncSeats(accepted.org_id).catch(()=>{});return ok({org:accepted.org_id});
- }
- if(!m||!o)throw Error('Create or join a workspace first.');
- if(path==='settings'){
-  manager(m);const input=z.object({name:str,timezone:str,start_time:time,end_time:time,grace:z.number().int().min(0).max(120),threshold:z.number().min(.8).max(1),workdays:z.array(z.number().int().min(0).max(6)).min(1),retention:z.number().int().min(1).max(3650)}).parse(b);new Intl.DateTimeFormat('en',{timeZone:input.timezone}).format();if(input.start_time>=input.end_time)throw Error('Workday end must be after start.');run('UPDATE organizations SET name=?,timezone=?,start_time=?,end_time=?,grace=?,threshold=?,workdays=?,retention=? WHERE id=?',input.name,input.timezone,input.start_time,input.end_time,input.grace,input.threshold,JSON.stringify(input.workdays),input.retention,o.id);audit(o.id,u.id,'settings.updated',input);
- }else if(path==='location'){
-  manager(m);const input=z.object({name:str,lat:z.number().min(-90).max(90),lng:z.number().min(-180).max(180),radius:z.number().int().min(10).max(10000)}).parse(b);db.transaction(()=>{if(all('SELECT id FROM locations WHERE org_id=?',o.id).length>=plan(o).locations)throw Error('Multiple work locations are included with Business.');run('INSERT INTO locations VALUES(?,?,?,?,?,?)',id(),o.id,input.name,input.lat,input.lng,input.radius);audit(o.id,u.id,'location.created',input);})();
- }else if(path==='location/delete'){manager(m);run('DELETE FROM locations WHERE id=? AND org_id=?',str.parse(b.id),o.id);audit(o.id,u.id,'location.deleted',{id:b.id});
- }else if(path==='invite'){
-  manager(m);const input=z.object({email:z.union([z.string().email(),z.literal('')]),role:z.enum(['staff','manager']),department:z.string().max(100)}).parse(b);const token=id(),url=invitationUrl(token);db.transaction(()=>{capacity(o);run('INSERT INTO invites(id,org_id,email,role,department,token,expires) VALUES(?,?,?,?,?,?,?)',id(),o.id,input.email,input.role,input.department,token,new Date(Date.now()+7*86400000).toISOString());audit(o.id,u.id,'invite.created',{email:input.email,role:input.role});})();
-  if(!input.email)return ok({url,emailStatus:'not_requested'});
-  const emailStatus=await sendWorkspaceInvite(one('SELECT id FROM invites WHERE token=?',token)!.id);
-  const message=emailStatus==='sent'?'Invitation email accepted for delivery through Supabase.':emailStatus==='not_configured'?'Invitation created, but email delivery is not configured. Your administrator needs to configure the server-only Supabase secret key. You can share this link now.':'Invitation created. Email is waiting for delivery; you can share this link now.';
-  return ok({url,emailStatus,message});
- }else if(path==='invite/revoke'){manager(m);run('UPDATE invites SET revoked=1 WHERE id=? AND org_id=?',str.parse(b.id),o.id);audit(o.id,u.id,'invite.revoked',{id:b.id});
- }else if(path==='person'){manager(m);const input=z.object({id:str,role:z.enum(['staff','manager']),department:z.string().max(100)}).parse(b);const member=one('SELECT * FROM memberships WHERE org_id=? AND user_id=? AND active=1',o.id,input.id);if(!member||member.role==='owner')throw Error('The workspace owner cannot be changed here.');run('UPDATE memberships SET role=?,department=? WHERE org_id=? AND user_id=?',input.role,input.department,o.id,input.id);audit(o.id,u.id,'person.updated',input);
- }else if(path==='person/remove'){
-  manager(m);const target=str.parse(b.id),person=one('SELECT * FROM memberships WHERE org_id=? AND user_id=? AND active=1',o.id,target);if(!person||person.role==='owner'||target===u.id)throw Error('The owner or your own membership cannot be removed here.');if(one('SELECT id FROM attendance WHERE org_id=? AND user_id=? AND check_out IS NULL',o.id,target))throw Error('Review the open workday before removing this person.');const key=`${o.id}:${target}`,template=one('SELECT * FROM face_templates WHERE user_id=?',key);if(template){await faceService.delete(o.id,decrypt(template.template));run('DELETE FROM face_templates WHERE user_id=?',key);}db.transaction(()=>{run('UPDATE memberships SET active=0,ended=? WHERE org_id=? AND user_id=?',now(),o.id,target);run("UPDATE leave_requests SET status='cancelled',comment='Workspace membership ended' WHERE org_id=? AND user_id=? AND status='pending'",o.id,target);audit(o.id,u.id,'person.removed',{user:target});})();await syncSeats(o.id).catch(()=>{});
- }else if(path==='owner/transfer'){
-  if(m.role!=='owner')throw Error('Only the owner can transfer this workspace.');const target=str.parse(b.id),account=one('SELECT password,supabase_id FROM users WHERE id=?',u.id)!;if(account.supabase_id){await confirmSupabasePassword(u.email,z.string().parse(b.password),account.supabase_id);}else if(!await compare(z.string().parse(b.password),account.password))throw Error('Your password is incorrect.');if(target===u.id||!one('SELECT id FROM memberships WHERE org_id=? AND user_id=? AND active=1',o.id,target))throw Error('Choose another active team member.');db.transaction(()=>{run("UPDATE memberships SET role='manager' WHERE id=?",m.id);run("UPDATE memberships SET role='owner' WHERE org_id=? AND user_id=?",o.id,target);audit(o.id,u.id,'ownership.transferred',{user:target});})();
- }else if(path==='profile/delete'){
-  if(b.confirm!=='DELETE')throw Error('Type DELETE to confirm.');const account=one('SELECT password,supabase_id FROM users WHERE id=?',u.id)!;if(account.supabase_id){await confirmSupabasePassword(u.email,z.string().parse(b.password),account.supabase_id);}else if(!await compare(z.string().parse(b.password),account.password))throw Error('Your password is incorrect.');const owned=all("SELECT * FROM memberships WHERE user_id=? AND role='owner'",u.id);if(owned.length)throw Error('Transfer ownership of each workspace before deleting your account.');if(account.supabase_id&&!supabaseAdminConfigured())throw Error('Account deletion requires the server-only SUPABASE_SECRET_KEY to be configured.');const memberships=all('SELECT * FROM memberships WHERE user_id=?',u.id);for(const member of memberships){const key=`${member.org_id}:${u.id}`,template=one('SELECT * FROM face_templates WHERE user_id=?',key);if(template){await faceService.delete(member.org_id,decrypt(template.template));run('DELETE FROM face_templates WHERE user_id=?',key);}}
-  if(account.supabase_id)await deleteSupabaseUser(account.supabase_id);
-  db.transaction(()=>{for(const table of ['attendance','manual_requests','leave_requests','notifications','tokens','challenges','attendance_proofs','leave_allowances','oidc_identities'])run(`DELETE FROM ${table} WHERE user_id=?`,u.id);run('DELETE FROM invites WHERE lower(email)=?',u.email.toLowerCase());run('DELETE FROM outbox WHERE lower(address)=?',u.email.toLowerCase());run('DELETE FROM audit_logs WHERE user_id=?',u.id);run('DELETE FROM memberships WHERE user_id=?',u.id);run('DELETE FROM users WHERE id=?',u.id);})();await logout();for(const member of memberships)await syncSeats(member.org_id).catch(()=>{});return ok({message:'Your account and personal records have been deleted.'});
- }else if(path==='consent'){if(b.accept!==true)throw Error('Consent is required for face and location attendance.');run('UPDATE memberships SET consent=? WHERE id=?',now(),m.id);audit(o.id,u.id,'consent.accepted',{version:'1',purpose:'attendance face and location verification'});
- }else if(path==='face/delete'){
-  const key=`${o.id}:${u.id}`,template=one('SELECT * FROM face_templates WHERE user_id=?',key);if(template){await faceService.delete(o.id,decrypt(template.template));run('DELETE FROM face_templates WHERE user_id=?',key);}audit(o.id,u.id,'biometric.deleted',{});
- }else if(path==='face/session'){
-  if(!m.consent)throw Error('Accept biometric and location consent first.');rateLimit('face:'+u.id,20);const kind=z.enum(['enroll','verify']).parse(b.kind);let loc:any=null,input:any={};if(kind==='verify'){input=z.object({action:z.enum(['in','out']),lat:z.number().min(-90).max(90),lng:z.number().min(-180).max(180),accuracy:z.number().min(0),mocked:z.boolean().optional()}).parse(b);loc=verifyLocation(o.id,input);if(!one('SELECT * FROM face_templates WHERE user_id=?',`${o.id}:${u.id}`))throw Error('Enroll your face in Profile first.');}
-  if(kind==='enroll')encrypt('key-check');const sessionId=await faceService.createSession();const proof=id();run('INSERT INTO attendance_proofs(id,org_id,user_id,session_id,kind,action,lat,lng,accuracy,created) VALUES(?,?,?,?,?,?,?,?,?,?)',proof,o.id,u.id,sessionId,kind,input.action||null,input.lat??null,input.lng??null,input.accuracy??null,now());return ok({proof,sessionId,region:process.env.AWS_REGION,location:loc?.name});
- }else if(path==='face/credentials'){
-  const proof=one('SELECT * FROM attendance_proofs WHERE id=? AND org_id=? AND user_id=? AND used=0',str.parse(b.proof),o.id,u.id);if(!proof||Date.now()-Date.parse(proof.created)>180000)throw Error('Your camera session expired. Try again.');return ok({credentials:await livenessCredentials()});
- }else if(path==='face/complete'){
-  const proof=one('SELECT * FROM attendance_proofs WHERE id=? AND org_id=? AND user_id=? AND used=0',str.parse(b.proof),o.id,u.id);if(!proof||Date.now()-Date.parse(proof.created)>180000)throw Error('Your camera session expired. Try again.');if(run('UPDATE attendance_proofs SET used=1 WHERE id=? AND used=0',proof.id).changes!==1)throw Error('This session was already used.');const key=`${o.id}:${u.id}`;
-  if(proof.kind==='enroll'){const old=one('SELECT * FROM face_templates WHERE user_id=?',key);if(old)throw Error('Delete your existing enrollment before enrolling again.');const template=await faceService.enroll(proof.session_id,o.id,u.id);run('INSERT INTO face_templates(user_id,template) VALUES(?,?)',key,encrypt(template));audit(o.id,u.id,'biometric.enrolled',{});return ok({message:'Your face is enrolled. You’re ready to check in.'});}
-  const location=verifyLocation(o.id,proof as any),template=one('SELECT * FROM face_templates WHERE user_id=?',key);if(!template)throw Error('Enroll your face first.');const score=await faceService.verify(proof.session_id,o.id,decrypt(template.template),o.threshold);writeAttendance(o,u.id,proof.action,{lat:proof.lat,lng:proof.lng,location:location.id,score});return ok({message:proof.action==='in'?"You're in. Have a great day!":'Done for the day. Great work.'});
- }else if(path==='break'){
-  const r=one('SELECT * FROM attendance WHERE org_id=? AND user_id=? AND check_out IS NULL ORDER BY check_in DESC LIMIT 1',o.id,u.id);if(!r)throw Error('Check in before starting a break.');if(b.action==='start'){if(r.break_start)throw Error('Your break has already started.');run('UPDATE attendance SET break_start=? WHERE id=?',now(),r.id);}else if(b.action==='end'){if(!r.break_start)throw Error('No break is in progress.');run('UPDATE attendance SET break_minutes=break_minutes+?,break_start=NULL WHERE id=?',(Date.now()-Date.parse(r.break_start))/60000,r.id);}else throw Error('Choose start or end.');
- }else if(path==='manual'){
-  const input=z.object({action:z.enum(['in','out']),reason:z.string().trim().min(5).max(1000),queuedAt:z.string().datetime().optional(),queueId:z.string().uuid().optional()}).parse(b);if(input.queueId&&one('SELECT id FROM manual_requests WHERE id=? AND org_id=? AND user_id=?',input.queueId,o.id,u.id))return ok();if(one("SELECT id FROM manual_requests WHERE org_id=? AND user_id=? AND status='pending'",o.id,u.id))throw Error('You already have a request waiting for review.');const stamp=input.queuedAt||now();if(Date.parse(stamp)>Date.now()+60000)throw Error('The device time is ahead. Check your clock.');run('INSERT INTO manual_requests(id,org_id,user_id,action,reason,created) VALUES(?,?,?,?,?,?)',input.queueId||id(),o.id,u.id,input.action,(input.queuedAt?'[Synced late; device time needs manager review] ':'')+input.reason,stamp);await managersNotify(o.id,`${u.name} requested manual attendance approval.`);
- }else if(path==='manual/decide'){
-  manager(m);const input=z.object({id:str,status:z.enum(['approved','declined']),comment:z.string().max(1000)}).parse(b);let target='';db.transaction(()=>{const r=one("SELECT * FROM manual_requests WHERE id=? AND org_id=? AND status='pending'",input.id,o.id);if(!r)throw Error('This request has already been reviewed.');if(r.user_id===u.id)throw Error('Another manager must review your attendance request.');target=r.user_id;if(input.status==='approved')writeAttendance(o,r.user_id,r.action,{notes:`Manual approval: ${r.reason}. ${input.comment}`,timestamp:r.created,synced:r.reason.startsWith('[Synced late')});run('UPDATE manual_requests SET status=?,comment=?,decided_by=? WHERE id=?',input.status,input.comment,u.id,input.id);audit(o.id,u.id,'manual.'+input.status,input);})();await notify(o.id,target,`Your attendance request was ${input.status}. ${input.comment}`);
- }else if(path==='leave/allowance'){
-  manager(m);if(o.plan==='free')throw Error('Individual leave allowances are included with Business.');const input=z.object({user_id:str,type_id:str,year:z.number().int().min(2000).max(2100),allowance:z.number().int().min(0).max(365)}).parse(b);if(!one('SELECT id FROM memberships WHERE org_id=? AND user_id=? AND active=1',o.id,input.user_id)||!one('SELECT id FROM leave_types WHERE id=? AND org_id=?',input.type_id,o.id))throw Error('Choose a person and leave type in this workspace.');const used=one("SELECT COALESCE(SUM(days),0) n FROM leave_requests WHERE org_id=? AND user_id=? AND type_id=? AND start LIKE ? AND status IN ('pending','approved')",o.id,input.user_id,input.type_id,input.year+'%')!.n;if(input.allowance>0&&input.allowance<used)throw Error('The allowance cannot be less than already approved or reserved leave.');run('INSERT INTO leave_allowances VALUES(?,?,?,?,?) ON CONFLICT(org_id,user_id,type_id,year) DO UPDATE SET allowance=excluded.allowance',o.id,input.user_id,input.type_id,input.year,input.allowance);audit(o.id,u.id,'leave_allowance.updated',input);
- }else if(path==='leave/type'){
-  manager(m);const input=z.object({id:z.string().optional(),name:str,allowance:z.number().int().min(0).max(365)}).parse(b);if(input.id)run('UPDATE leave_types SET name=?,allowance=? WHERE id=? AND org_id=?',input.name,input.allowance,input.id,o.id);else run('INSERT INTO leave_types VALUES(?,?,?,?)',id(),o.id,input.name,input.allowance);audit(o.id,u.id,'leave_type.updated',input);
- }else if(path==='leave'){
-  const input=z.object({type_id:str,start:day,end:day,note:z.string().max(1000)}).parse(b);if(!Number.isFinite(Date.parse(input.start))||!Number.isFinite(Date.parse(input.end))||input.end<input.start||input.start<dateAt(now(),o.timezone)||input.start.slice(0,4)!==input.end.slice(0,4))throw Error('Choose future dates within the same calendar year.');const type=one('SELECT * FROM leave_types WHERE id=? AND org_id=?',input.type_id,o.id);if(!type)throw Error('Choose a leave type.');validateCalendarDay(input.start);validateCalendarDay(input.end);const allowance=allowanceFor(o.id,u.id,type,Number(input.start.slice(0,4)));const days=leaveDays(input.start,input.end,JSON.parse(o.workdays));if(days<1)throw Error('Choose at least one working day.');db.transaction(()=>{if(one("SELECT id FROM leave_requests WHERE org_id=? AND user_id=? AND status IN ('pending','approved') AND start<=? AND end>=?",o.id,u.id,input.end,input.start))throw Error('These dates overlap another leave request.');const used=one("SELECT COALESCE(SUM(days),0) n FROM leave_requests WHERE org_id=? AND user_id=? AND type_id=? AND status IN ('pending','approved') AND start LIKE ?",o.id,u.id,type.id,input.start.slice(0,4)+'%')!.n;if(allowance>0&&used+days>allowance)throw Error('This request exceeds your available leave balance.');run('INSERT INTO leave_requests(id,org_id,user_id,type_id,start,end,days,note,created) VALUES(?,?,?,?,?,?,?,?,?)',id(),o.id,u.id,type.id,input.start,input.end,days,input.note,now());})();await managersNotify(o.id,`${u.name} requested ${days} days of ${type.name.toLowerCase()} leave.`);
- }else if(path==='leave/decide'){
-  const input=z.object({id:str,status:z.enum(['approved','declined','cancelled']),comment:z.string().max(1000).default('')}).parse(b);let target='';db.transaction(()=>{const r=one('SELECT * FROM leave_requests WHERE id=? AND org_id=?',input.id,o.id);if(!r)throw Error('Request not found.');target=r.user_id;if(input.status==='cancelled'){if(r.user_id!==u.id||!['pending','approved'].includes(r.status))throw Error('This request cannot be cancelled.');}else{manager(m);if(r.user_id===u.id)throw Error('Another manager must review your leave request.');if(r.status!=='pending')throw Error('This request has already been reviewed.');}run('UPDATE leave_requests SET status=?,comment=? WHERE id=?',input.status,input.comment,r.id);audit(o.id,u.id,'leave.'+input.status,input);})();await notify(o.id,target,input.status==='approved'?'Good news, your leave is approved. Enjoy the rest.':`Your leave request was ${input.status}. ${input.comment}`);
- }else if(path==='notifications/read'){run('UPDATE notifications SET seen=1 WHERE user_id=? AND org_id=?',u.id,o.id);
- }else if(path==='billing/checkout'){
-  manager(m);rateLimit('checkout:'+o.id,5);if(o.plan!=='free')throw Error('Your workspace already has a paid plan. Open subscription management instead.');return ok({url:await createCheckout(o.id,u.email,appUrl())});
- }else if(path==='billing/verify'){
-  manager(m);const reference=str.parse(b.reference);if(!one('SELECT reference FROM paystack_checkouts WHERE reference=? AND org_id=?',reference,o.id))throw Error('This checkout does not belong to your workspace.');await verifyPayment(reference);return ok({message:'Your test payment is verified. Welcome to Business.'});
- }else if(path==='billing/portal'){
-  manager(m);const subscription=one('SELECT * FROM subscriptions WHERE org_id=?',o.id);if(!subscription?.subscription)throw Error('Your Paystack subscription is still being confirmed. Please try again shortly.');const result=await paystack('subscription/'+encodeURIComponent(subscription.subscription)+'/manage/link');audit(o.id,u.id,'billing.portal_opened',{});return ok({url:result.link}); }else if(path==='retention/run'){
-  manager(m);const cutoff=new Date(Date.now()-o.retention*86400000).toISOString();const result=run('DELETE FROM attendance WHERE org_id=? AND check_in<? AND check_out IS NOT NULL',o.id,cutoff);audit(o.id,u.id,'retention.applied',{cutoff,deleted:result.changes});
- }else return fail('Not found',404);
- return ok();
-}catch(e){return error(e);}}
-async function webhook(req:NextRequest){try{const secret=process.env.PAYSTACK_SECRET_KEY;if(!secret?.startsWith('sk_test_'))return fail('Paystack test webhook not configured.',503);const raw=await req.text();const event=verifiedEvent(raw,req.headers.get('x-paystack-signature')||'',secret);await handleBillingEvent(event);return ok();}catch(e){return error(e);}}
+import { paystack, createCheckout, verifyPayment, syncSeats, verifiedEvent, handleBillingEvent, businessPrice, businessPriceLabel } from '@/lib/billing';
+import { allowanceFor, validateCalendarDay } from '@/lib/leave';
+import { beginSso, finishSso, ssoConfigured } from '@/lib/oidc';
+import { supabaseAuthGet, supabaseAuthPost } from '@/lib/supabase-auth';
+import { supabaseConfigured, confirmSupabasePassword, deleteSupabaseUser, supabaseAdminConfigured } from '@/lib/supabase';
+import { validAuthOrigin } from '@/lib/auth-origin';
+export const runtime = 'nodejs';
+const str = z.string().trim().min(1).max(500), day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/), time = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+const appUrl = () => process.env.APP_URL || 'http://localhost:3000';
+const ok = (data: object = {}) => NextResponse.json({ ok: true, ...data }, { headers: { 'Cache-Control': 'no-store' } });
+const fail = (message: string, status = 400) => NextResponse.json({ error: message }, { status });
+function manager(m: any) {
+    if (!m || !['owner', 'manager'].includes(m.role))
+        throw Error('Manager access required.');
+}
+function plan(o: any) { return plans[o.plan as keyof typeof plans] || plans.free; }
+async function context(req: NextRequest) {
+    const u = await user();
+    if (!u)
+        throw Error('Please sign in.');
+    const org = req.nextUrl.searchParams.get('org');
+    const m = org ? await one('SELECT * FROM memberships WHERE user_id=? AND org_id=? AND active=1', u.id, org) : await one('SELECT * FROM memberships WHERE user_id=? AND active=1 ORDER BY created,id LIMIT 1', u.id);
+    return { u, m, o: m ? await one('SELECT * FROM organizations WHERE id=?', m.org_id) : null };
+}
+async function sendToken(uid: string, address: string, kind: string) { const t = id(); await run('INSERT INTO tokens VALUES(?,?,?,?)', t, uid, kind, new Date(Date.now() + 3600000).toISOString()); await email(address, kind === 'verify' ? 'Verify your Timecard email' : 'Reset your Timecard password', `${appUrl()}/?${kind}=${t}`); }
+async function capacity(o: any) {
+    const count = (await one('SELECT COUNT(*) n FROM memberships WHERE org_id=? AND active=1', o.id))!.n;
+    const pending = (await one('SELECT COUNT(*) n FROM invites WHERE org_id=? AND revoked=0 AND accepted=0 AND expires>?', o.id, now()))!.n;
+    if (count + pending >= plan(o).limit)
+        throw Error('Your workspace has reached its staff limit. Upgrade to invite more people.');
+}
+async function managersNotify(org: string, message: string) {
+    for (const p of await all("SELECT user_id FROM memberships WHERE org_id=? AND role IN ('owner','manager')", org))
+        await notify(org, p.user_id, message);
+}
+function error(e: unknown) {
+    if (e instanceof z.ZodError)
+        return fail(e.errors.map(x => `${x.path.join('.')}: ${x.message}`).join('; '));
+    const m = e instanceof Error ? e.message : 'Something went wrong.';
+    return fail(m.includes('UNIQUE constraint') ? 'This account or record already exists.' : m, m === 'Please sign in.' ? 401 : 400);
+}
+export async function GET(req: NextRequest, { params }: {
+    params: Promise<{
+        path: string[];
+    }>;
+}) {
+    try {
+        const path = (await params).path.join('/');
+        const providerResponse = await supabaseAuthGet(req, path);
+        if (providerResponse)
+            return providerResponse;
+        if (path === 'auth/sso')
+            return await beginSso();
+        if (path === 'auth/sso/callback')
+            return await finishSso(req);
+        if (path === 'public/config') {
+            await db.kind();
+            return ok({ sso: ssoConfigured(), supabase: supabaseConfigured(), pricing: { label: businessPriceLabel(), amount: businessPrice.amount, currency: businessPrice.currency, freeLimit: plans.free.limit, businessLimit: plans.business.limit } });
+        }
+        if (path === 'invite') {
+            const invite = await one('SELECT i.email,i.role,i.department,o.name FROM invites i JOIN organizations o ON o.id=i.org_id WHERE i.token=? AND i.revoked=0 AND i.accepted=0 AND i.expires>?', req.nextUrl.searchParams.get('token'), now());
+            return invite ? ok(invite) : fail('This invite has expired or was revoked.', 404);
+        }
+        const { u, m, o } = await context(req);
+        if (path === 'state') {
+            const workspaces = await all('SELECT o.id,o.name,m.role FROM organizations o JOIN memberships m ON m.org_id=o.id WHERE m.user_id=? AND m.active=1', u.id);
+            if (!m || !o)
+                return ok({ user: u, workspaces, organization: null });
+            const isManager = ['owner', 'manager'].includes(m.role), today = dateAt(now(), o.timezone);
+            return ok({ billing: await one('SELECT status,cancel_at_period_end,quantity FROM subscriptions WHERE org_id=?', o.id), leaveAllowances: await all('SELECT * FROM leave_allowances WHERE org_id=?' + (isManager ? '' : ' AND user_id=?'), o.id, ...(isManager ? [] : [u.id])), user: u, membership: m, organization: o, workspaces, locations: await all('SELECT * FROM locations WHERE org_id=?', o.id), faceEnrolled: !!await one('SELECT user_id FROM face_templates WHERE user_id=?', `${o.id}:${u.id}`), faceConfigured: faceConfigured(), personal: await all('SELECT * FROM attendance WHERE org_id=? AND user_id=? ORDER BY day DESC LIMIT 60', o.id, u.id), notifications: await all('SELECT * FROM notifications WHERE user_id=? AND org_id=? ORDER BY created DESC LIMIT 30', u.id, o.id), leaveTypes: await all('SELECT * FROM leave_types WHERE org_id=?', o.id), leaveRequests: await all(`SELECT r.*,u.name,t.name type_name FROM leave_requests r JOIN users u ON u.id=r.user_id JOIN leave_types t ON t.id=r.type_id WHERE r.org_id=? ${isManager ? '' : 'AND r.user_id=?'} ORDER BY r.created DESC`, o.id, ...(isManager ? [] : [u.id])), people: isManager ? await all('SELECT u.id,u.name,u.email,m.role,m.department,m.consent FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.org_id=? AND m.active=1', o.id) : [], invites: isManager ? await all('SELECT * FROM invites WHERE org_id=? ORDER BY expires DESC,id DESC', o.id) : [], manualRequests: await all(`SELECT r.*,u.name FROM manual_requests r JOIN users u ON u.id=r.user_id WHERE r.org_id=? ${isManager ? '' : 'AND r.user_id=?'} ORDER BY created DESC`, o.id, ...(isManager ? [] : [u.id])), today: isManager ? await records(o, u.id, true, new URLSearchParams({ start: today, end: today })) : [], audit: isManager ? await all('SELECT a.*,u.name FROM audit_logs a JOIN users u ON u.id=a.user_id WHERE a.org_id=? ORDER BY created DESC LIMIT 100', o.id) : [], planLimit: plan(o).limit === Infinity ? null : plan(o).limit });
+        }
+        if (!m || !o)
+            throw Error('Create or join a workspace first.');
+        if (path === 'records')
+            return ok({ rows: await records(o, u.id, ['owner', 'manager'].includes(m.role) && req.nextUrl.searchParams.get('personal') !== '1', req.nextUrl.searchParams) });
+        if (path === 'export') {
+            const format = req.nextUrl.searchParams.get('format') || 'csv';
+            if (!['csv', 'xlsx'].includes(format))
+                throw Error('Choose CSV or XLSX.');
+            if (format === 'xlsx' && !plan(o).xlsx)
+                throw Error('XLSX exports are included with Business.');
+            const rows = await records(o, u.id, ['owner', 'manager'].includes(m.role) && req.nextUrl.searchParams.get('personal') !== '1', req.nextUrl.searchParams);
+            const columns = ['Staff name', 'Date', 'Check-in', 'Check-out', 'Total hours', 'Status', 'Location name', 'Late flag', 'Leave type', 'Approval notes'];
+            const data = rows.map(r => [r.name, r.day, r.check_in || '', r.check_out || '', Number(r.total_hours.toFixed(2)), r.status, r.location_name || '', r.late ? 'Yes' : 'No', r.leave_type || '', r.notes || '']);
+            await audit(o.id, u.id, 'report.export', { format, count: rows.length });
+            if (format === 'xlsx') {
+                const ExcelJS = (await import('exceljs')).default;
+                const book = new ExcelJS.Workbook();
+                const sheet = book.addWorksheet('Attendance');
+                sheet.addRow(columns);
+                sheet.addRows(data);
+                sheet.getRow(1).font = { bold: true };
+                sheet.columns.forEach(c => c.width = 22);
+                const buffer = await book.xlsx.writeBuffer();
+                return new NextResponse(new Uint8Array(buffer as ArrayBuffer), { headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Content-Disposition': 'attachment; filename="timecard-report.xlsx"', 'Cache-Control': 'no-store' } });
+            }
+            return new NextResponse('\uFEFF' + [columns, ...data].map(row => row.map(safeCsv).join(',')).join('\r\n'), { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="timecard-report.csv"', 'Cache-Control': 'no-store' } });
+        }
+        return fail('Not found', 404);
+    }
+    catch (e) {
+        return error(e);
+    }
+}
+export async function POST(req: NextRequest, { params }: {
+    params: Promise<{
+        path: string[];
+    }>;
+}) {
+    try {
+        const path = (await params).path.join('/');
+        if (path === 'billing/webhook')
+            return await webhook(req);
+        if (!validAuthOrigin(req))
+            return fail('Invalid request origin.', 403);
+        if (Number(req.headers.get('content-length') || 0) > 100000)
+            return fail('Request is too large.', 413);
+        const b = await req.json();
+        const providerResponse = await supabaseAuthPost(path, b);
+        if (providerResponse)
+            return providerResponse;
+        if (path === 'auth/logout') {
+            await logout();
+            return ok();
+        }
+        if (path === 'auth/signup') {
+            const input = z.object({ name: str, email: z.string().email().max(254), password: z.string().min(10).max(128) }).parse(b);
+            await rateLimit('signup:' + input.email.toLowerCase(), 5);
+            if (process.env.NODE_ENV === 'production' && !process.env.EMAIL_API_KEY)
+                throw Error('Email verification must be configured before accounts can be created.');
+            const uid = id();
+            await run('INSERT INTO users(id,email,name,password) VALUES(?,?,?,?)', uid, input.email.toLowerCase(), input.name, await hash(input.password, 12));
+            await session(uid);
+            try {
+                await sendToken(uid, input.email, 'verify');
+            }
+            catch {
+                return ok({ message: 'Your account is ready. Verification email is queued; you can resend it from the next screen.' });
+            }
+            return ok({ message: 'Check your email to verify your account.' });
+        }
+        if (path === 'auth/login') {
+            const input = z.object({ email: z.string().email(), password: z.string().max(128) }).parse(b);
+            await rateLimit('login:' + input.email.toLowerCase());
+            const u = await one('SELECT * FROM users WHERE email=?', input.email.toLowerCase());
+            if (!u || !await compare(input.password, u.password))
+                throw Error('Email or password is incorrect.');
+            await session(u.id);
+            return ok();
+        }
+        if (path === 'auth/reset-request') {
+            const address = z.string().email().parse(b.email);
+            await rateLimit('reset:' + address, 3);
+            const u = await one('SELECT * FROM users WHERE email=?', address.toLowerCase());
+            if (u)
+                await sendToken(u.id, address, 'reset');
+            return ok({ message: 'If this account exists, a reset link has been sent.' });
+        }
+        if (path === 'auth/verify' || path === 'auth/reset') {
+            const kind = path.split('/')[1], token = await one('SELECT * FROM tokens WHERE id=? AND kind=? AND expires>?', str.parse(b.token), kind, now());
+            if (!token)
+                throw Error('This link is invalid or has expired.');
+            if (kind === 'verify')
+                await run('UPDATE users SET verified=1 WHERE id=?', token.user_id);
+            else {
+                await run('UPDATE users SET password=?,auth_version=auth_version+1 WHERE id=?', await hash(z.string().min(10).max(128).parse(b.password), 12), token.user_id);
+                await logout();
+            }
+            await run('DELETE FROM tokens WHERE user_id=? AND kind=?', token.user_id, kind);
+            return ok();
+        }
+        if (path === 'sales') {
+            const input = z.object({ name: str, email: z.string().email(), company: str, message: str }).parse(b);
+            await rateLimit('sales:' + input.email, 3);
+            if (!process.env.SALES_EMAIL)
+                throw Error('The sales contact is not configured yet.');
+            await email(process.env.SALES_EMAIL, `Enterprise enquiry: ${input.company}`, `${input.name}\n${input.email}\n${input.message}`);
+            return ok({ message: 'Thanks. Our team will be in touch.' });
+        }
+        const { u, m, o } = await context(req);
+        if (path === 'auth/resend') {
+            await rateLimit('verify:' + u.id, 3);
+            await sendToken(u.id, u.email, 'verify');
+            return ok();
+        }
+        if (!u.verified)
+            throw Error('Please verify your email before continuing.');
+        if (path === 'workspace') {
+            const input = z.object({ name: str, timezone: str, start_time: time, end_time: time }).parse(b);
+            new Intl.DateTimeFormat('en', { timeZone: input.timezone }).format();
+            if (input.start_time >= input.end_time)
+                throw Error('Workday end must be after start.');
+            const org = id();
+            await db.transaction(async () => {
+                await run('INSERT INTO organizations(id,name,timezone,start_time,end_time) VALUES(?,?,?,?,?)', org, input.name, input.timezone, input.start_time, input.end_time);
+                await run('INSERT INTO memberships(id,org_id,user_id,role) VALUES(?,?,?,?)', id(), org, u.id, 'owner');
+                for (const [name, allowance] of [['Annual', 20], ['Sick', 10], ['Unpaid', 0], ['Other', 0]])
+                    await run('INSERT INTO leave_types VALUES(?,?,?,?)', id(), org, name, allowance);
+                await audit(org, u.id, 'workspace.created', { name: input.name });
+            })();
+            return ok({ org });
+        }
+        if (path === 'invite/accept') {
+            const token = str.parse(b.token);
+            await db.transaction(async () => {
+                const invite = await one('SELECT * FROM invites WHERE token=? AND revoked=0 AND accepted=0 AND expires>?', token, now());
+                if (!invite)
+                    throw Error('This invite has expired or was revoked.');
+                if (invite.email && invite.email.toLowerCase() !== u.email.toLowerCase())
+                    throw Error('Sign in with the email this invitation was sent to.');
+                const org = (await one('SELECT * FROM organizations WHERE id=?', invite.org_id))!;
+                if ((await one('SELECT COUNT(*) n FROM memberships WHERE org_id=? AND active=1', org.id))!.n >= plan(org).limit)
+                    throw Error('This workspace has reached its staff limit.');
+                await run('INSERT INTO memberships(id,org_id,user_id,role,department) VALUES(?,?,?,?,?) ON CONFLICT(org_id,user_id) DO UPDATE SET role=excluded.role,department=excluded.department,active=1,ended=NULL,created=CURRENT_TIMESTAMP WHERE memberships.active=0', id(), org.id, u.id, invite.role, invite.department);
+                await run('UPDATE invites SET accepted=1 WHERE id=?', invite.id);
+                await audit(org.id, u.id, 'invite.accepted', { invite: invite.id });
+            })();
+            const accepted = (await one('SELECT org_id FROM invites WHERE token=?', token))!;
+            await syncSeats(accepted.org_id).catch(() => { });
+            return ok({ org: accepted.org_id });
+        }
+        if (!m || !o)
+            throw Error('Create or join a workspace first.');
+        if (path === 'settings') {
+            manager(m);
+            const input = z.object({ name: str, timezone: str, start_time: time, end_time: time, grace: z.number().int().min(0).max(120), threshold: z.number().min(.8).max(1), workdays: z.array(z.number().int().min(0).max(6)).min(1), retention: z.number().int().min(1).max(3650) }).parse(b);
+            new Intl.DateTimeFormat('en', { timeZone: input.timezone }).format();
+            if (input.start_time >= input.end_time)
+                throw Error('Workday end must be after start.');
+            await run('UPDATE organizations SET name=?,timezone=?,start_time=?,end_time=?,grace=?,threshold=?,workdays=?,retention=? WHERE id=?', input.name, input.timezone, input.start_time, input.end_time, input.grace, input.threshold, JSON.stringify(input.workdays), input.retention, o.id);
+            await audit(o.id, u.id, 'settings.updated', input);
+        }
+        else if (path === 'location') {
+            manager(m);
+            const input = z.object({ name: str, lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180), radius: z.number().int().min(10).max(10000) }).parse(b);
+            await db.transaction(async () => {
+                if ((await all('SELECT id FROM locations WHERE org_id=?', o.id)).length >= plan(o).locations)
+                    throw Error('Multiple work locations are included with Business.');
+                await run('INSERT INTO locations VALUES(?,?,?,?,?,?)', id(), o.id, input.name, input.lat, input.lng, input.radius);
+                await audit(o.id, u.id, 'location.created', input);
+            })();
+        }
+        else if (path === 'location/delete') {
+            manager(m);
+            await run('DELETE FROM locations WHERE id=? AND org_id=?', str.parse(b.id), o.id);
+            await audit(o.id, u.id, 'location.deleted', { id: b.id });
+        }
+        else if (path === 'invite') {
+            manager(m);
+            const input = z.object({ email: z.union([z.string().email(), z.literal('')]), role: z.enum(['staff', 'manager']), department: z.string().max(100) }).parse(b);
+            const token = id(), url = invitationUrl(token);
+            await db.transaction(async () => { await capacity(o); await run('INSERT INTO invites(id,org_id,email,role,department,token,expires) VALUES(?,?,?,?,?,?,?)', id(), o.id, input.email, input.role, input.department, token, new Date(Date.now() + 7 * 86400000).toISOString()); await audit(o.id, u.id, 'invite.created', { email: input.email, role: input.role }); })();
+            if (!input.email)
+                return ok({ url, emailStatus: 'not_requested' });
+            const emailStatus = await sendWorkspaceInvite((await one('SELECT id FROM invites WHERE token=?', token))!.id);
+            const message = emailStatus === 'sent' ? 'Invitation email accepted for delivery through Supabase.' : emailStatus === 'not_configured' ? 'Invitation created, but email delivery is not configured. Your administrator needs to configure the server-only Supabase secret key. You can share this link now.' : 'Invitation created. Email is waiting for delivery; you can share this link now.';
+            return ok({ url, emailStatus, message });
+        }
+        else if (path === 'invite/revoke') {
+            manager(m);
+            await run('UPDATE invites SET revoked=1 WHERE id=? AND org_id=?', str.parse(b.id), o.id);
+            await audit(o.id, u.id, 'invite.revoked', { id: b.id });
+        }
+        else if (path === 'person') {
+            manager(m);
+            const input = z.object({ id: str, role: z.enum(['staff', 'manager']), department: z.string().max(100) }).parse(b);
+            const member = await one('SELECT * FROM memberships WHERE org_id=? AND user_id=? AND active=1', o.id, input.id);
+            if (!member || member.role === 'owner')
+                throw Error('The workspace owner cannot be changed here.');
+            await run('UPDATE memberships SET role=?,department=? WHERE org_id=? AND user_id=?', input.role, input.department, o.id, input.id);
+            await audit(o.id, u.id, 'person.updated', input);
+        }
+        else if (path === 'person/remove') {
+            manager(m);
+            const target = str.parse(b.id), person = await one('SELECT * FROM memberships WHERE org_id=? AND user_id=? AND active=1', o.id, target);
+            if (!person || person.role === 'owner' || target === u.id)
+                throw Error('The owner or your own membership cannot be removed here.');
+            if (await one('SELECT id FROM attendance WHERE org_id=? AND user_id=? AND check_out IS NULL', o.id, target))
+                throw Error('Review the open workday before removing this person.');
+            const key = `${o.id}:${target}`, template = await one('SELECT * FROM face_templates WHERE user_id=?', key);
+            if (template) {
+                await faceService.delete(o.id, decrypt(template.template));
+                await run('DELETE FROM face_templates WHERE user_id=?', key);
+            }
+            await db.transaction(async () => { await run('UPDATE memberships SET active=0,ended=? WHERE org_id=? AND user_id=?', now(), o.id, target); await run("UPDATE leave_requests SET status='cancelled',comment='Workspace membership ended' WHERE org_id=? AND user_id=? AND status='pending'", o.id, target); await audit(o.id, u.id, 'person.removed', { user: target }); })();
+            await syncSeats(o.id).catch(() => { });
+        }
+        else if (path === 'owner/transfer') {
+            if (m.role !== 'owner')
+                throw Error('Only the owner can transfer this workspace.');
+            const target = str.parse(b.id), account = (await one('SELECT password,supabase_id FROM users WHERE id=?', u.id))!;
+            if (account.supabase_id) {
+                await confirmSupabasePassword(u.email, z.string().parse(b.password), account.supabase_id);
+            }
+            else if (!await compare(z.string().parse(b.password), account.password))
+                throw Error('Your password is incorrect.');
+            if (target === u.id || !await one('SELECT id FROM memberships WHERE org_id=? AND user_id=? AND active=1', o.id, target))
+                throw Error('Choose another active team member.');
+            await db.transaction(async () => { await run("UPDATE memberships SET role='manager' WHERE id=?", m.id); await run("UPDATE memberships SET role='owner' WHERE org_id=? AND user_id=?", o.id, target); await audit(o.id, u.id, 'ownership.transferred', { user: target }); })();
+        }
+        else if (path === 'profile/delete') {
+            if (b.confirm !== 'DELETE')
+                throw Error('Type DELETE to confirm.');
+            const account = (await one('SELECT password,supabase_id FROM users WHERE id=?', u.id))!;
+            if (account.supabase_id) {
+                await confirmSupabasePassword(u.email, z.string().parse(b.password), account.supabase_id);
+            }
+            else if (!await compare(z.string().parse(b.password), account.password))
+                throw Error('Your password is incorrect.');
+            const owned = await all("SELECT * FROM memberships WHERE user_id=? AND role='owner'", u.id);
+            if (owned.length)
+                throw Error('Transfer ownership of each workspace before deleting your account.');
+            if (account.supabase_id && !supabaseAdminConfigured())
+                throw Error('Account deletion requires the server-only SUPABASE_SECRET_KEY to be configured.');
+            const memberships = await all('SELECT * FROM memberships WHERE user_id=?', u.id);
+            for (const member of memberships) {
+                const key = `${member.org_id}:${u.id}`, template = await one('SELECT * FROM face_templates WHERE user_id=?', key);
+                if (template) {
+                    await faceService.delete(member.org_id, decrypt(template.template));
+                    await run('DELETE FROM face_templates WHERE user_id=?', key);
+                }
+            }
+            if (account.supabase_id)
+                await deleteSupabaseUser(account.supabase_id);
+            await db.transaction(async () => {
+                for (const table of ['attendance', 'manual_requests', 'leave_requests', 'notifications', 'tokens', 'challenges', 'attendance_proofs', 'leave_allowances', 'oidc_identities'])
+                    await run(`DELETE FROM ${table} WHERE user_id=?`, u.id);
+                await run('DELETE FROM invites WHERE lower(email)=?', u.email.toLowerCase());
+                await run('DELETE FROM outbox WHERE lower(address)=?', u.email.toLowerCase());
+                await run('DELETE FROM audit_logs WHERE user_id=?', u.id);
+                await run('DELETE FROM memberships WHERE user_id=?', u.id);
+                await run('DELETE FROM users WHERE id=?', u.id);
+            })();
+            await logout();
+            for (const member of memberships)
+                await syncSeats(member.org_id).catch(() => { });
+            return ok({ message: 'Your account and personal records have been deleted.' });
+        }
+        else if (path === 'consent') {
+            if (b.accept !== true)
+                throw Error('Consent is required for face and location attendance.');
+            await run('UPDATE memberships SET consent=? WHERE id=?', now(), m.id);
+            await audit(o.id, u.id, 'consent.accepted', { version: '1', purpose: 'attendance face and location verification' });
+        }
+        else if (path === 'face/delete') {
+            const key = `${o.id}:${u.id}`, template = await one('SELECT * FROM face_templates WHERE user_id=?', key);
+            if (template) {
+                await faceService.delete(o.id, decrypt(template.template));
+                await run('DELETE FROM face_templates WHERE user_id=?', key);
+            }
+            await audit(o.id, u.id, 'biometric.deleted', {});
+        }
+        else if (path === 'face/session') {
+            if (!m.consent)
+                throw Error('Accept biometric and location consent first.');
+            await rateLimit('face:' + u.id, 20);
+            const kind = z.enum(['enroll', 'verify']).parse(b.kind);
+            let loc: any = null, input: any = {};
+            if (kind === 'verify') {
+                input = z.object({ action: z.enum(['in', 'out']), lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180), accuracy: z.number().min(0), mocked: z.boolean().optional() }).parse(b);
+                loc = await verifyLocation(o.id, input);
+                if (!await one('SELECT * FROM face_templates WHERE user_id=?', `${o.id}:${u.id}`))
+                    throw Error('Enroll your face in Profile first.');
+            }
+            if (kind === 'enroll')
+                encrypt('key-check');
+            const sessionId = await faceService.createSession();
+            const proof = id();
+            await run('INSERT INTO attendance_proofs(id,org_id,user_id,session_id,kind,action,lat,lng,accuracy,created) VALUES(?,?,?,?,?,?,?,?,?,?)', proof, o.id, u.id, sessionId, kind, input.action || null, input.lat ?? null, input.lng ?? null, input.accuracy ?? null, now());
+            return ok({ proof, sessionId, region: process.env.AWS_REGION, location: loc?.name });
+        }
+        else if (path === 'face/credentials') {
+            const proof = await one('SELECT * FROM attendance_proofs WHERE id=? AND org_id=? AND user_id=? AND used=0', str.parse(b.proof), o.id, u.id);
+            if (!proof || Date.now() - Date.parse(proof.created) > 180000)
+                throw Error('Your camera session expired. Try again.');
+            return ok({ credentials: await livenessCredentials() });
+        }
+        else if (path === 'face/complete') {
+            const proof = await one('SELECT * FROM attendance_proofs WHERE id=? AND org_id=? AND user_id=? AND used=0', str.parse(b.proof), o.id, u.id);
+            if (!proof || Date.now() - Date.parse(proof.created) > 180000)
+                throw Error('Your camera session expired. Try again.');
+            if ((await run('UPDATE attendance_proofs SET used=1 WHERE id=? AND used=0', proof.id)).changes !== 1)
+                throw Error('This session was already used.');
+            const key = `${o.id}:${u.id}`;
+            if (proof.kind === 'enroll') {
+                const old = await one('SELECT * FROM face_templates WHERE user_id=?', key);
+                if (old)
+                    throw Error('Delete your existing enrollment before enrolling again.');
+                const template = await faceService.enroll(proof.session_id, o.id, u.id);
+                await run('INSERT INTO face_templates(user_id,template) VALUES(?,?)', key, encrypt(template));
+                await audit(o.id, u.id, 'biometric.enrolled', {});
+                return ok({ message: 'Your face is enrolled. You’re ready to check in.' });
+            }
+            const location = await verifyLocation(o.id, proof as any), template = await one('SELECT * FROM face_templates WHERE user_id=?', key);
+            if (!template)
+                throw Error('Enroll your face first.');
+            const score = await faceService.verify(proof.session_id, o.id, decrypt(template.template), o.threshold);
+            await writeAttendance(o, u.id, proof.action, { lat: proof.lat, lng: proof.lng, location: location.id, score });
+            return ok({ message: proof.action === 'in' ? "You're in. Have a great day!" : 'Done for the day. Great work.' });
+        }
+        else if (path === 'break') {
+            const r = await one('SELECT * FROM attendance WHERE org_id=? AND user_id=? AND check_out IS NULL ORDER BY check_in DESC LIMIT 1', o.id, u.id);
+            if (!r)
+                throw Error('Check in before starting a break.');
+            if (b.action === 'start') {
+                if (r.break_start)
+                    throw Error('Your break has already started.');
+                await run('UPDATE attendance SET break_start=? WHERE id=?', now(), r.id);
+            }
+            else if (b.action === 'end') {
+                if (!r.break_start)
+                    throw Error('No break is in progress.');
+                await run('UPDATE attendance SET break_minutes=break_minutes+?,break_start=NULL WHERE id=?', (Date.now() - Date.parse(r.break_start)) / 60000, r.id);
+            }
+            else
+                throw Error('Choose start or end.');
+        }
+        else if (path === 'manual') {
+            const input = z.object({ action: z.enum(['in', 'out']), reason: z.string().trim().min(5).max(1000), queuedAt: z.string().datetime().optional(), queueId: z.string().uuid().optional() }).parse(b);
+            if (input.queueId && await one('SELECT id FROM manual_requests WHERE id=? AND org_id=? AND user_id=?', input.queueId, o.id, u.id))
+                return ok();
+            if (await one("SELECT id FROM manual_requests WHERE org_id=? AND user_id=? AND status='pending'", o.id, u.id))
+                throw Error('You already have a request waiting for review.');
+            const stamp = input.queuedAt || now();
+            if (Date.parse(stamp) > Date.now() + 60000)
+                throw Error('The device time is ahead. Check your clock.');
+            await run('INSERT INTO manual_requests(id,org_id,user_id,action,reason,created) VALUES(?,?,?,?,?,?)', input.queueId || id(), o.id, u.id, input.action, (input.queuedAt ? '[Synced late; device time needs manager review] ' : '') + input.reason, stamp);
+            await managersNotify(o.id, `${u.name} requested manual attendance approval.`);
+        }
+        else if (path === 'manual/decide') {
+            manager(m);
+            const input = z.object({ id: str, status: z.enum(['approved', 'declined']), comment: z.string().max(1000) }).parse(b);
+            let target = '';
+            await db.transaction(async () => {
+                const r = await one("SELECT * FROM manual_requests WHERE id=? AND org_id=? AND status='pending'", input.id, o.id);
+                if (!r)
+                    throw Error('This request has already been reviewed.');
+                if (r.user_id === u.id)
+                    throw Error('Another manager must review your attendance request.');
+                target = r.user_id;
+                if (input.status === 'approved')
+                    await writeAttendance(o, r.user_id, r.action, { notes: `Manual approval: ${r.reason}. ${input.comment}`, timestamp: r.created, synced: r.reason.startsWith('[Synced late') });
+                await run('UPDATE manual_requests SET status=?,comment=?,decided_by=? WHERE id=?', input.status, input.comment, u.id, input.id);
+                await audit(o.id, u.id, 'manual.' + input.status, input);
+            })();
+            await notify(o.id, target, `Your attendance request was ${input.status}. ${input.comment}`);
+        }
+        else if (path === 'leave/allowance') {
+            manager(m);
+            if (o.plan === 'free')
+                throw Error('Individual leave allowances are included with Business.');
+            const input = z.object({ user_id: str, type_id: str, year: z.number().int().min(2000).max(2100), allowance: z.number().int().min(0).max(365) }).parse(b);
+            if (!await one('SELECT id FROM memberships WHERE org_id=? AND user_id=? AND active=1', o.id, input.user_id) || !await one('SELECT id FROM leave_types WHERE id=? AND org_id=?', input.type_id, o.id))
+                throw Error('Choose a person and leave type in this workspace.');
+            const used = (await one("SELECT CAST(COALESCE(SUM(days),0) AS BIGINT) n FROM leave_requests WHERE org_id=? AND user_id=? AND type_id=? AND start LIKE ? AND status IN ('pending','approved')", o.id, input.user_id, input.type_id, input.year + '%'))!.n;
+            if (input.allowance > 0 && input.allowance < used)
+                throw Error('The allowance cannot be less than already approved or reserved leave.');
+            await run('INSERT INTO leave_allowances VALUES(?,?,?,?,?) ON CONFLICT(org_id,user_id,type_id,year) DO UPDATE SET allowance=excluded.allowance', o.id, input.user_id, input.type_id, input.year, input.allowance);
+            await audit(o.id, u.id, 'leave_allowance.updated', input);
+        }
+        else if (path === 'leave/type') {
+            manager(m);
+            const input = z.object({ id: z.string().optional(), name: str, allowance: z.number().int().min(0).max(365) }).parse(b);
+            if (input.id)
+                await run('UPDATE leave_types SET name=?,allowance=? WHERE id=? AND org_id=?', input.name, input.allowance, input.id, o.id);
+            else
+                await run('INSERT INTO leave_types VALUES(?,?,?,?)', id(), o.id, input.name, input.allowance);
+            await audit(o.id, u.id, 'leave_type.updated', input);
+        }
+        else if (path === 'leave') {
+            const input = z.object({ type_id: str, start: day, end: day, note: z.string().max(1000) }).parse(b);
+            if (!Number.isFinite(Date.parse(input.start)) || !Number.isFinite(Date.parse(input.end)) || input.end < input.start || input.start < dateAt(now(), o.timezone) || input.start.slice(0, 4) !== input.end.slice(0, 4))
+                throw Error('Choose future dates within the same calendar year.');
+            const type = await one('SELECT * FROM leave_types WHERE id=? AND org_id=?', input.type_id, o.id);
+            if (!type)
+                throw Error('Choose a leave type.');
+            validateCalendarDay(input.start);
+            validateCalendarDay(input.end);
+            const allowance = await allowanceFor(o.id, u.id, type, Number(input.start.slice(0, 4)));
+            const days = leaveDays(input.start, input.end, JSON.parse(o.workdays));
+            if (days < 1)
+                throw Error('Choose at least one working day.');
+            await db.transaction(async () => {
+                if (await one("SELECT id FROM leave_requests WHERE org_id=? AND user_id=? AND status IN ('pending','approved') AND start<=? AND end>=?", o.id, u.id, input.end, input.start))
+                    throw Error('These dates overlap another leave request.');
+                const used = (await one("SELECT CAST(COALESCE(SUM(days),0) AS BIGINT) n FROM leave_requests WHERE org_id=? AND user_id=? AND type_id=? AND status IN ('pending','approved') AND start LIKE ?", o.id, u.id, type.id, input.start.slice(0, 4) + '%'))!.n;
+                if (allowance > 0 && used + days > allowance)
+                    throw Error('This request exceeds your available leave balance.');
+                await run('INSERT INTO leave_requests(id,org_id,user_id,type_id,start,end,days,note,created) VALUES(?,?,?,?,?,?,?,?,?)', id(), o.id, u.id, type.id, input.start, input.end, days, input.note, now());
+            })();
+            await managersNotify(o.id, `${u.name} requested ${days} days of ${type.name.toLowerCase()} leave.`);
+        }
+        else if (path === 'leave/decide') {
+            const input = z.object({ id: str, status: z.enum(['approved', 'declined', 'cancelled']), comment: z.string().max(1000).default('') }).parse(b);
+            let target = '';
+            await db.transaction(async () => {
+                const r = await one('SELECT * FROM leave_requests WHERE id=? AND org_id=?', input.id, o.id);
+                if (!r)
+                    throw Error('Request not found.');
+                target = r.user_id;
+                if (input.status === 'cancelled') {
+                    if (r.user_id !== u.id || !['pending', 'approved'].includes(r.status))
+                        throw Error('This request cannot be cancelled.');
+                }
+                else {
+                    manager(m);
+                    if (r.user_id === u.id)
+                        throw Error('Another manager must review your leave request.');
+                    if (r.status !== 'pending')
+                        throw Error('This request has already been reviewed.');
+                }
+                await run('UPDATE leave_requests SET status=?,comment=? WHERE id=?', input.status, input.comment, r.id);
+                await audit(o.id, u.id, 'leave.' + input.status, input);
+            })();
+            await notify(o.id, target, input.status === 'approved' ? 'Good news, your leave is approved. Enjoy the rest.' : `Your leave request was ${input.status}. ${input.comment}`);
+        }
+        else if (path === 'notifications/read') {
+            await run('UPDATE notifications SET seen=1 WHERE user_id=? AND org_id=?', u.id, o.id);
+        }
+        else if (path === 'billing/checkout') {
+            manager(m);
+            await rateLimit('checkout:' + o.id, 5);
+            if (o.plan !== 'free')
+                throw Error('Your workspace already has a paid plan. Open subscription management instead.');
+            return ok({ url: await createCheckout(o.id, u.email, appUrl()) });
+        }
+        else if (path === 'billing/verify') {
+            manager(m);
+            const reference = str.parse(b.reference);
+            if (!await one('SELECT reference FROM paystack_checkouts WHERE reference=? AND org_id=?', reference, o.id))
+                throw Error('This checkout does not belong to your workspace.');
+            await verifyPayment(reference);
+            return ok({ message: 'Your test payment is verified. Welcome to Business.' });
+        }
+        else if (path === 'billing/portal') {
+            manager(m);
+            const subscription = await one('SELECT * FROM subscriptions WHERE org_id=?', o.id);
+            if (!subscription?.subscription)
+                throw Error('Your Paystack subscription is still being confirmed. Please try again shortly.');
+            const result = await paystack('subscription/' + encodeURIComponent(subscription.subscription) + '/manage/link');
+            await audit(o.id, u.id, 'billing.portal_opened', {});
+            return ok({ url: result.link });
+        }
+        else if (path === 'retention/run') {
+            manager(m);
+            const cutoff = new Date(Date.now() - o.retention * 86400000).toISOString();
+            const result = await run('DELETE FROM attendance WHERE org_id=? AND check_in<? AND check_out IS NOT NULL', o.id, cutoff);
+            await audit(o.id, u.id, 'retention.applied', { cutoff, deleted: result.changes });
+        }
+        else
+            return fail('Not found', 404);
+        return ok();
+    }
+    catch (e) {
+        return error(e);
+    }
+}
+async function webhook(req: NextRequest) {
+    try {
+        const secret = process.env.PAYSTACK_SECRET_KEY;
+        if (!secret?.startsWith('sk_test_'))
+            return fail('Paystack test webhook not configured.', 503);
+        const raw = await req.text();
+        const event = verifiedEvent(raw, req.headers.get('x-paystack-signature') || '', secret);
+        await handleBillingEvent(event);
+        return ok();
+    }
+    catch (e) {
+        return error(e);
+    }
+}

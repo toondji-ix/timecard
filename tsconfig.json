@@ -35,7 +35,8 @@
     ".next-test/types/**/*.ts",
     ".next/types/**/*.ts",
     "next-env.d.ts",
-    ".next-auth-test/types/**/*.ts"
+    ".next-auth-test/types/**/*.ts",
+    ".next-pg-test/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

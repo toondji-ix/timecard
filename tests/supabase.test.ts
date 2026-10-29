@@ -35,7 +35,7 @@ before(async()=>{
   if(['/auth/v1/recover','/auth/v1/resend','/auth/v1/logout'].includes(url.pathname)){res.end('{}');return;}
   res.statusCode=404;res.end('{}');
  });await new Promise<void>(r=>provider.listen(0,'127.0.0.1',r));providerUrl='http://127.0.0.1:'+(provider.address() as {port:number}).port;
- server=spawn(process.execPath,[resolve('node_modules/next/dist/bin/next'),'dev','--port','3118'],{env:{...process.env,NODE_ENV:'development',NEXT_DIST_DIR:'.next-auth-test',DATABASE_PATH:file,TIMECARD_MAINTENANCE:'off',SUPABASE_URL:providerUrl,SUPABASE_PUBLISHABLE_KEY:'sb_publishable_isolated_test',NEXT_PUBLIC_SUPABASE_URL:'',NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:'',SUPABASE_ANON_KEY:'',NEXT_PUBLIC_SUPABASE_ANON_KEY:'',SUPABASE_SECRET_KEY:'',SESSION_SECRET:'isolated-supabase-test-session-secret',APP_URL:renderOrigin,RENDER_EXTERNAL_URL:renderOrigin,EMAIL_API_KEY:''},windowsHide:true,stdio:['ignore','pipe','pipe']});
+ server=spawn(process.execPath,[resolve('node_modules/next/dist/bin/next'),'dev','--port','3118'],{env:{...process.env,NODE_ENV:'development',DATABASE_URL:'',DATABASE_TEST_PGLITE_PATH:'',NEXT_DIST_DIR:'.next-auth-test',DATABASE_PATH:file,TIMECARD_MAINTENANCE:'off',SUPABASE_URL:providerUrl,SUPABASE_PUBLISHABLE_KEY:'sb_publishable_isolated_test',NEXT_PUBLIC_SUPABASE_URL:'',NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:'',SUPABASE_ANON_KEY:'',NEXT_PUBLIC_SUPABASE_ANON_KEY:'',SUPABASE_SECRET_KEY:'',SESSION_SECRET:'isolated-supabase-test-session-secret',APP_URL:renderOrigin,RENDER_EXTERNAL_URL:renderOrigin,EMAIL_API_KEY:''},windowsHide:true,stdio:['ignore','pipe','pipe']});
  server.stdout?.on('data',v=>logs=(logs+v).slice(-6000));server.stderr?.on('data',v=>logs=(logs+v).slice(-6000));let ready=false;for(let i=0;i<30;i++){try{if((await fetch(base+'/api/public/config',{signal:AbortSignal.timeout(30000)})).ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,1000));}assert.ok(ready,logs);db=new Database(file);
  db.prepare('INSERT INTO users(id,email,name,password,verified) VALUES(?,?,?,?,1)').run('existing-local',address,'Existing Person',await hash('Old-local-password!',10));
  db.prepare("INSERT INTO organizations(id,name) VALUES('existing-org','Existing workspace')").run();db.prepare("INSERT INTO memberships(id,org_id,user_id,role) VALUES('existing-membership','existing-org','existing-local','owner')").run();
@@ -62,6 +62,12 @@ test('verified provider login links the existing account without changing member
  const forged=new Map(Array.from(browser).filter(([k])=>k==='timecard_session'));assert.equal((await call('state',undefined,forged)).status,401);
  assert.equal((db.prepare('SELECT count(*) n FROM users').get() as {n:number}).n,1);
 });
+test('signing out and signing in again preserves the existing workspace and user identity',async()=>{
+ const before=await call('state');assert.equal(before.status,200);const uid=before.data.user.id,org=before.data.organization.id;
+ assert.equal((await call('auth/logout',{})).status,200);assert.equal((await call('state')).status,401);assert.equal((await call('auth/login',{email:address,password:newPassword})).status,200);
+ const after=await call('state');assert.equal(after.status,200);assert.equal(after.data.user.id,uid);assert.equal(after.data.organization.id,org);assert.equal(after.data.membership.role,'owner');assert.equal((db.prepare('SELECT count(*) n FROM users').get() as {n:number}).n,1);
+});
+
 test('workspace creation accepts the deployed HTTPS origin and still rejects foreign or unauthenticated requests',async()=>{
  const input={name:'Semester Technologies',timezone:'Africa/Lagos',start_time:'09:00',end_time:'18:00'},before=(db.prepare('SELECT count(*) n FROM organizations').get() as {n:number}).n;
  for(const headers of [{Origin:'https://attacker.example','x-forwarded-host':'attacker.example','x-forwarded-proto':'https'},{Origin:renderOrigin,'sec-fetch-site':'cross-site'}] as Record<string,string>[]){const rejected=await call('workspace',input,browser,headers);assert.equal(rejected.status,403);assert.equal(rejected.data.error,'Invalid request origin.');}
