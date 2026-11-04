@@ -38,6 +38,8 @@ References: [Supabase SSL configuration and CA download](https://supabase.com/do
 
 The first runtime connection creates tables in the private `timecard` schema, preserving Supabase's `auth` tables. Schema changes are additive and serialized. The database user needs schema/table creation permission. Builds do not connect to the database. The `/api/public/config` health check verifies runtime database initialization.
 
+Completed PostgreSQL schema migrations are recorded in `timecard.schema_migrations`. Web processes and maintenance workers check this record rather than rerunning table alterations and backfills on each start. Migrations acquire the same transaction lock as application writes before touching application tables. A migration aborted by PostgreSQL with deadlock code `40P01` rolls back completely and retries at most twice; normal application callbacks are not automatically replayed. For future schema changes, update the migration version with the corresponding additive changes. Do not delete the migration record to troubleshoot an ordinary request error.
+
 After deploying, create a workspace, sign out and in, then restart the Render service and verify the same workspace appears. Records live independently of Render's filesystem. Free services still sleep: maintenance only runs while awake. For guaranteed cleanup and retries, run `npm run maintenance` with a separate scheduler and the same environment.
 
 ### Import existing SQLite records
