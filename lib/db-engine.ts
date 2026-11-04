@@ -3,6 +3,7 @@ import {mkdirSync} from 'node:fs';
 import {dirname,resolve} from 'node:path';
 import {schema,additions} from './db-schema';
 import {postgresSql} from './db-sql';
+import {databaseConnectionOptions,databaseConnectionError} from './db-tls';
 export type Row=Record<string,any>;
 type Result={rows:Row[];changes:number};
 type Connection={query:(sql:string,params?:unknown[])=>Promise<Result>;exec:(sql:string)=>Promise<void>;release?:()=>void};
@@ -23,15 +24,14 @@ async function initialize():Promise<Engine>{
    const connection:Connection={query:async(sql,params=[])=>{const r=await pg.query<Row>(sql,params);return {rows:normalize(r.rows),changes:r.affectedRows||0};},exec:async sql=>{await pg.exec(sql);}};
    connect=async()=>connection;close=async()=>pg.close();
   }else{
-   let parsed:URL;try{parsed=new URL(url!);if(!['postgres:','postgresql:'].includes(parsed.protocol))throw Error();}catch{throw Error('DATABASE_URL must be the Supabase PostgreSQL pooler connection string, not the project API URL.');}
+   const options=databaseConnectionOptions(url!);
    const {Pool,types}=await import('pg');
-   // Verify TLS using trusted CAs. A real database URL is never printed.
-   for(const key of ['sslmode','sslcert','sslkey','sslrootcert'])parsed.searchParams.delete(key);
-   const pool=new Pool({connectionString:parsed.href,ssl:{rejectUnauthorized:true},max:3,connectionTimeoutMillis:15000,idleTimeoutMillis:30000,types:{getTypeParser:(oid:number,format?:any)=>oid===20?Number:types.getTypeParser(oid,format)}});
+   const pool=new Pool({...options,max:3,connectionTimeoutMillis:15000,idleTimeoutMillis:30000,types:{getTypeParser:(oid:number,format?:any)=>oid===20?Number:types.getTypeParser(oid,format)}});
    pool.on('error',()=>console.error('Database connection interrupted; the next request will reconnect.'));
    connect=async()=>{const client=await pool.connect();return {query:async(sql,params=[])=>{const r=await client.query(sql,params);return {rows:normalize(r.rows),changes:r.rowCount||0};},exec:async sql=>{await client.query(sql);},release:()=>client.release()};};close=async()=>pool.end();
   }
-  const connection=await connect();
+  let connection:Connection;
+  try{connection=await connect();}catch(e){await close().catch(()=>{});throw databaseConnectionError(e);}
   try{
    await connection.exec('BEGIN');
    await connection.query('SELECT pg_advisory_xact_lock(739285104)');

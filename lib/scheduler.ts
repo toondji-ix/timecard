@@ -7,7 +7,8 @@ const globalScheduler = globalThis as unknown as {
 export async function startMaintenance() {
     if (globalScheduler.timecardMaintenance)
         return;
-    await db.exec('CREATE TABLE IF NOT EXISTS job_leases(name TEXT PRIMARY KEY,expires INTEGER)');
+    // The database initializer creates job_leases. Connect on the first tick,
+    // so an unavailable database does not crash Next's instrumentation hook.
     const tick = async () => {
         const expires = Date.now() + 3600000;
         const acquired = await one(`INSERT INTO job_leases(name,expires) VALUES('maintenance',?)

@@ -19,6 +19,23 @@ Use the existing Supabase PostgreSQL database for workspace storage. No Render d
 
 In Supabase **Connect**, select **Transaction pooler**, copy the PostgreSQL URI and replace the password placeholder. Save it as server-only `DATABASE_URL` in **Render Environment**. Use the database password, not the publishable API key; URL-encode special characters in the password. The app uses verified TLS, a small connection pool and no named prepared statements. Never use a NEXT_PUBLIC_ prefix for this secret.
 
+### Database certificate setup
+
+If deployment logs show `SELF_SIGNED_CERT_IN_CHAIN` or “self-signed certificate in certificate chain”, configure the trusted database CA:
+
+1. In your Supabase project, open **Database Settings → SSL Configuration** and download the CA certificate for your database. Menu placement may vary; use the Database Settings link in the official SSL guide below.
+2. Open the downloaded certificate in a text editor. Copy the complete PEM text, including `-----BEGIN CERTIFICATE-----` and `-----END CERTIFICATE-----`.
+3. In **Render → Environment**, add `DATABASE_SSL_CA` with that complete text. Actual line breaks and literal `\n` separators are both supported. Keep `DATABASE_URL` unchanged.
+4. Deploy the updated code and environment together. Check `/api/public/config` returns HTTP 200, then verify sign-in and your existing workspace.
+
+Alternatively, create a Render secret file named `supabase-ca.crt` containing the PEM and set `DATABASE_SSL_CA_FILE=/etc/secrets/supabase-ca.crt`. Use either the inline certificate or the file. The app also honors `sslrootcert` file paths in DATABASE_URL. A configured certificate that cannot be read or parsed is rejected with guidance.
+
+Certificate and hostname verification remain enabled. Do not set `NODE_TLS_REJECT_UNAUTHORIZED=0` or disable database certificate verification. Download the CA from the Supabase dashboard, not from an unverified endpoint. No database password or private key belongs in DATABASE_SSL_CA. If an old deployment has a global TLS-disable variable, remove it.
+
+The maintenance hook schedules its first database operation after startup instead of opening the database during Next instrumentation registration. Database initialization and the health check still require a valid verified connection; deferring maintenance does not bypass a failed connection or create a temporary database. Once configured, the same certificate settings apply to requests, maintenance, backups and imports.
+
+References: [Supabase SSL configuration and CA download](https://supabase.com/docs/guides/platform/ssl-enforcement), [node-postgres certificate configuration](https://node-postgres.com/features/ssl).
+
 The first runtime connection creates tables in the private `timecard` schema, preserving Supabase's `auth` tables. Schema changes are additive and serialized. The database user needs schema/table creation permission. Builds do not connect to the database. The `/api/public/config` health check verifies runtime database initialization.
 
 After deploying, create a workspace, sign out and in, then restart the Render service and verify the same workspace appears. Records live independently of Render's filesystem. Free services still sleep: maintenance only runs while awake. For guaranteed cleanup and retries, run `npm run maintenance` with a separate scheduler and the same environment.
